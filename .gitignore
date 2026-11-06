@@ -1,0 +1,33 @@
+# Entorno de Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Datos operativos y generados (contienen informacion real de tickets)
+data/*
+!data/.gitkeep
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
+reportes/*
+!reportes/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# Archivos de Excel y respaldos
+*.xlsx
+*.xls
+*.csv
+*.log
+*.bak
+
+# Configuracion local del editor / sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
