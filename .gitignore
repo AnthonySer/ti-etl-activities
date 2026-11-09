@@ -25,6 +25,10 @@ logs/*
 *.log
 *.bak
 
+# Documentos
+docs
+
+
 # Configuracion local del editor / sistema
 .vscode/
 .idea/
