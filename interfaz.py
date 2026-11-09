@@ -50,17 +50,21 @@ from core.reimportacion import (
     aplicar_reimportacion,
 )
 from core.reportes import generar_reporte
+from panel_principal import PanelPrincipal, SEMANTICA
 
 LOGGER = logging.getLogger("automatizador")
 
 TITULO = "Sistema Integral de Tickets TI - INKACROPS"
-COLOR_FONDO = "#F4F6F9"
-COLOR_CABECERA = "#1F3864"
-COLOR_ACENTO = "#2E75B6"
-COLOR_TEXTO = "#1F2937"
-COLOR_OK = "#1E7B34"
-COLOR_ALERTA = "#B45309"
-COLOR_ERROR = "#B91C1C"
+COLOR_FONDO = "#f8fafc"
+COLOR_CABECERA = "#ffffff"
+COLOR_ACENTO = "#2563eb"
+COLOR_TEXTO = "#0f172a"
+COLOR_TEXTO_SECUNDARIO = "#64748b"
+COLOR_BORDE = "#e2e8f0"
+COLOR_TABLA_CABECERA = "#f1f5f9"
+COLOR_OK = "#15803d"
+COLOR_ALERTA = "#b45309"
+COLOR_ERROR = "#b91c1c"
 
 _ETIQUETAS_TIPO = {
     TIPO_NUEVO: "Nuevo",
@@ -115,6 +119,7 @@ class AplicacionTk(tk.Tk):
         self._reimportacion = None
         self._reporte: dict[str, Any] | None = None
         self._cola: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self._cola_after_id: str | None = None
         self._ocupado = False
 
         self._crear_estilos()
@@ -125,7 +130,7 @@ class AplicacionTk(tk.Tk):
         self._refrescar_pendientes()
         self._refrescar_maestro()
         self._refrescar_auditoria()
-        self.after(120, self._procesar_cola)
+        self._cola_after_id = self.after(120, self._procesar_cola)
 
     # ------------------------------------------------------------------
     # Construcción visual
@@ -136,102 +141,303 @@ class AplicacionTk(tk.Tk):
             estilo.theme_use("clam")
         except tk.TclError:  # pragma: no cover
             pass
+
+        estilo.configure(
+            ".",
+            font=("Segoe UI", 10),
+            background=COLOR_FONDO,
+            foreground=COLOR_TEXTO,
+        )
         estilo.configure("TFrame", background=COLOR_FONDO)
         estilo.configure("TLabel", background=COLOR_FONDO, foreground=COLOR_TEXTO)
         estilo.configure(
             "Titulo.TLabel",
             background=COLOR_CABECERA,
-            foreground="white",
+            foreground=COLOR_TEXTO,
             font=("Segoe UI", 17, "bold"),
         )
         estilo.configure(
             "Subtitulo.TLabel",
             background=COLOR_CABECERA,
-            foreground="#D9E2F3",
+            foreground=COLOR_TEXTO_SECUNDARIO,
             font=("Segoe UI", 9),
         )
         estilo.configure(
             "Seccion.TLabel",
-            font=("Segoe UI", 11, "bold"),
-            foreground=COLOR_CABECERA,
+            background=COLOR_FONDO,
+            foreground=COLOR_TEXTO,
+            font=("Segoe UI", 12, "bold"),
         )
         estilo.configure(
             "Valor.TLabel",
+            background=COLOR_FONDO,
+            foreground=COLOR_ACENTO,
             font=("Segoe UI", 16, "bold"),
-            foreground=COLOR_CABECERA,
         )
         estilo.configure(
             "Clave.TLabel",
-            font=("Segoe UI", 8),
-            foreground="#6B7280",
+            background=COLOR_FONDO,
+            foreground=COLOR_TEXTO_SECUNDARIO,
+            font=("Segoe UI", 9),
         )
+
         estilo.configure(
             "TButton",
-            font=("Segoe UI", 9),
-            padding=(10, 5),
+            font=("Segoe UI", 10),
+            padding=(12, 7),
+            background=COLOR_CABECERA,
+            foreground=COLOR_TEXTO,
+            bordercolor=COLOR_BORDE,
+            lightcolor=COLOR_BORDE,
+            darkcolor=COLOR_BORDE,
+            focuscolor=COLOR_ACENTO,
+        )
+        estilo.map(
+            "TButton",
+            background=[("active", "#f1f5f9"), ("pressed", "#e2e8f0")],
+            foreground=[("disabled", "#94a3b8")],
         )
         estilo.configure(
             "Principal.TButton",
-            font=("Segoe UI", 9, "bold"),
-            padding=(12, 6),
+            font=("Segoe UI", 10, "bold"),
+            padding=(14, 8),
+            background=COLOR_ACENTO,
+            foreground="#ffffff",
+            bordercolor=COLOR_ACENTO,
+            lightcolor=COLOR_ACENTO,
+            darkcolor=COLOR_ACENTO,
+            focuscolor="#93c5fd",
         )
-        estilo.configure("TNotebook", background=COLOR_FONDO, borderwidth=0)
-        estilo.configure("TNotebook.Tab", font=("Segoe UI", 9), padding=(14, 7))
+        estilo.map(
+            "Principal.TButton",
+            background=[("active", "#1d4ed8"), ("pressed", "#1e40af")],
+            foreground=[("active", "#ffffff"), ("disabled", "#e2e8f0")],
+        )
+
+        estilo.configure(
+            "TNotebook",
+            background=COLOR_FONDO,
+            borderwidth=0,
+            tabmargins=(0, 6, 0, 0),
+        )
+        estilo.configure(
+            "TNotebook.Tab",
+            font=("Segoe UI", 10),
+            padding=(16, 9),
+            background="#eef2f7",
+            foreground=COLOR_TEXTO_SECUNDARIO,
+            bordercolor=COLOR_BORDE,
+            lightcolor="#eef2f7",
+            darkcolor="#eef2f7",
+        )
+        estilo.map(
+            "TNotebook.Tab",
+            background=[("selected", COLOR_CABECERA), ("active", "#f1f5f9")],
+            foreground=[("selected", COLOR_ACENTO), ("active", COLOR_TEXTO)],
+        )
+
         estilo.configure(
             "Treeview",
-            font=("Segoe UI", 9),
-            rowheight=22,
-            background="white",
-            fieldbackground="white",
+            font=("Segoe UI", 10),
+            rowheight=26,
+            background=COLOR_CABECERA,
+            fieldbackground=COLOR_CABECERA,
+            foreground=COLOR_TEXTO,
+            bordercolor=COLOR_BORDE,
+            lightcolor=COLOR_BORDE,
+            darkcolor=COLOR_BORDE,
+            borderwidth=0,
         )
         estilo.configure(
             "Treeview.Heading",
             font=("Segoe UI", 9, "bold"),
-            background=COLOR_CABECERA,
-            foreground="white",
+            background=COLOR_TABLA_CABECERA,
+            foreground="#475569",
+            relief="flat",
+            padding=(8, 7),
+            bordercolor=COLOR_BORDE,
+            lightcolor=COLOR_BORDE,
+            darkcolor=COLOR_BORDE,
         )
-        estilo.map("Treeview", background=[("selected", COLOR_ACENTO)])
+        estilo.map("Treeview.Heading", background=[("active", "#e2e8f0")])
+        estilo.map(
+            "Treeview",
+            background=[("selected", "#dbeafe")],
+            foreground=[("selected", COLOR_TEXTO)],
+        )
+
+        estilo.configure(
+            "TLabelframe",
+            background=COLOR_FONDO,
+            bordercolor=COLOR_BORDE,
+            lightcolor=COLOR_BORDE,
+            darkcolor=COLOR_BORDE,
+            relief="solid",
+            borderwidth=1,
+        )
+        estilo.configure(
+            "TLabelframe.Label",
+            background=COLOR_FONDO,
+            foreground=COLOR_TEXTO,
+            font=("Segoe UI", 10, "bold"),
+        )
+
+        estilo.configure(
+            "TEntry",
+            fieldbackground=COLOR_CABECERA,
+            foreground=COLOR_TEXTO,
+            bordercolor=COLOR_BORDE,
+            lightcolor=COLOR_BORDE,
+            darkcolor=COLOR_BORDE,
+            padding=6,
+        )
+        estilo.map(
+            "TEntry",
+            bordercolor=[("focus", COLOR_ACENTO)],
+            lightcolor=[("focus", COLOR_ACENTO)],
+            darkcolor=[("focus", COLOR_ACENTO)],
+        )
+        estilo.configure(
+            "TCombobox",
+            fieldbackground=COLOR_CABECERA,
+            background=COLOR_CABECERA,
+            foreground=COLOR_TEXTO,
+            bordercolor=COLOR_BORDE,
+            lightcolor=COLOR_BORDE,
+            darkcolor=COLOR_BORDE,
+            arrowcolor=COLOR_TEXTO_SECUNDARIO,
+            padding=5,
+        )
+        estilo.map(
+            "TCombobox",
+            fieldbackground=[("readonly", COLOR_CABECERA)],
+            bordercolor=[("focus", COLOR_ACENTO)],
+            lightcolor=[("focus", COLOR_ACENTO)],
+            darkcolor=[("focus", COLOR_ACENTO)],
+        )
+
+        estilo.configure(
+            "Horizontal.TProgressbar",
+            troughcolor="#e2e8f0",
+            background=COLOR_ACENTO,
+            bordercolor=COLOR_BORDE,
+            lightcolor=COLOR_ACENTO,
+            darkcolor=COLOR_ACENTO,
+            thickness=8,
+        )
+        estilo.configure(
+            "TCheckbutton",
+            background=COLOR_FONDO,
+            foreground=COLOR_TEXTO,
+            font=("Segoe UI", 9),
+            focuscolor=COLOR_ACENTO,
+        )
+        estilo.map(
+            "TCheckbutton",
+            background=[("active", COLOR_FONDO)],
+            foreground=[("disabled", "#94a3b8")],
+        )
+        estilo.configure("TPanedwindow", background=COLOR_FONDO)
+        estilo.configure(
+            "TScrollbar",
+            background="#cbd5e1",
+            troughcolor=COLOR_FONDO,
+            bordercolor=COLOR_FONDO,
+            arrowcolor=COLOR_TEXTO_SECUNDARIO,
+            relief="flat",
+        )
 
     def _crear_cabecera(self) -> None:
         cabecera = tk.Frame(self, bg=COLOR_CABECERA, height=72)
         cabecera.pack(side="top", fill="x")
         cabecera.pack_propagate(False)
 
+        marca = tk.Frame(cabecera, bg=COLOR_ACENTO, width=34, height=34)
+        marca.pack(side="left", padx=(20, 12), pady=19)
+        marca.pack_propagate(False)
+        tk.Label(
+            marca,
+            text="TI",
+            bg=COLOR_ACENTO,
+            fg="#ffffff",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(expand=True)
+
         bloque = tk.Frame(cabecera, bg=COLOR_CABECERA)
-        bloque.pack(side="left", padx=18, pady=10)
-        ttk.Label(
-            bloque, text=TITULO, style="Titulo.TLabel"
-        ).pack(anchor="w")
-        ttk.Label(
+        bloque.pack(side="left", pady=12)
+        tk.Label(
             bloque,
-            text="Procesamiento, clasificación, reimportación y consolidación de tickets",
-            style="Subtitulo.TLabel",
+            text="INKACROPS",
+            bg=COLOR_CABECERA,
+            fg=COLOR_TEXTO,
+            font=("Segoe UI", 13, "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            bloque,
+            text=TITULO,
+            bg=COLOR_CABECERA,
+            fg=COLOR_TEXTO_SECUNDARIO,
+            font=("Segoe UI", 9),
+            anchor="w",
         ).pack(anchor="w")
 
         self._var_estado_app = tk.StringVar(value="Listo")
-        self._lbl_estado_app = tk.Label(
+        self._badge_estado_app = tk.Frame(
             cabecera,
-            textvariable=self._var_estado_app,
-            bg=COLOR_CABECERA,
-            fg="#C6E0B4",
-            font=("Segoe UI", 9, "bold"),
+            bg=SEMANTICA["success"][0],
+            highlightbackground=SEMANTICA["success"][2],
+            highlightthickness=1,
+            bd=0,
         )
-        self._lbl_estado_app.pack(side="right", padx=18)
+        self._badge_estado_app.pack(side="right", padx=20)
+        self._punto_estado_app = tk.Canvas(
+            self._badge_estado_app,
+            width=8,
+            height=8,
+            bg=SEMANTICA["success"][0],
+            highlightthickness=0,
+            bd=0,
+        )
+        self._punto_estado_app_item = self._punto_estado_app.create_oval(
+            1, 1, 7, 7, fill=SEMANTICA["success"][1], outline=""
+        )
+        self._punto_estado_app.pack(side="left", padx=(10, 0))
+        self._lbl_estado_app = tk.Label(
+            self._badge_estado_app,
+            textvariable=self._var_estado_app,
+            bg=SEMANTICA["success"][0],
+            fg=SEMANTICA["success"][1],
+            font=("Segoe UI", 9, "bold"),
+            pady=5,
+        )
+        self._lbl_estado_app.pack(side="left", padx=(6, 12))
+
+        tk.Frame(self, bg=COLOR_BORDE, height=1).pack(side="top", fill="x")
+
+    def _pintar_estado_app(self, texto: str, tipo: str = "success") -> None:
+        fondo, color, borde = SEMANTICA.get(tipo, SEMANTICA["neutral"])
+        self._var_estado_app.set(texto)
+        self._badge_estado_app.configure(bg=fondo, highlightbackground=borde)
+        self._punto_estado_app.configure(bg=fondo)
+        self._punto_estado_app.itemconfigure(self._punto_estado_app_item, fill=color)
+        self._lbl_estado_app.configure(bg=fondo, fg=color)
 
     def _crear_pestanas(self) -> None:
-        contenedor = ttk.Frame(self, padding=(12, 10, 12, 10))
+        contenedor = ttk.Frame(self, padding=(12, 8, 12, 12))
         contenedor.pack(fill="both", expand=True)
 
         self._cuaderno = ttk.Notebook(contenedor)
         self._cuaderno.pack(fill="both", expand=True)
+        self._cuaderno.enable_traversal()
 
-        self._tab_panel = ttk.Frame(self._cuaderno, padding=14)
-        self._tab_procesar = ttk.Frame(self._cuaderno, padding=14)
-        self._tab_usuarios = ttk.Frame(self._cuaderno, padding=14)
-        self._tab_reimportar = ttk.Frame(self._cuaderno, padding=14)
-        self._tab_maestro = ttk.Frame(self._cuaderno, padding=14)
-        self._tab_reportes = ttk.Frame(self._cuaderno, padding=14)
-        self._tab_auditoria = ttk.Frame(self._cuaderno, padding=14)
+        self._tab_panel = ttk.Frame(self._cuaderno, padding=0)
+        self._tab_procesar = ttk.Frame(self._cuaderno, padding=18)
+        self._tab_usuarios = ttk.Frame(self._cuaderno, padding=18)
+        self._tab_reimportar = ttk.Frame(self._cuaderno, padding=18)
+        self._tab_maestro = ttk.Frame(self._cuaderno, padding=18)
+        self._tab_reportes = ttk.Frame(self._cuaderno, padding=18)
+        self._tab_auditoria = ttk.Frame(self._cuaderno, padding=18)
 
         self._cuaderno.add(self._tab_panel, text="Panel principal")
         self._cuaderno.add(self._tab_procesar, text="Cargar y procesar")
@@ -253,149 +459,100 @@ class AplicacionTk(tk.Tk):
     # Panel principal
     # ------------------------------------------------------------------
     def _construir_panel(self) -> None:
-        ttk.Label(
-            self._tab_panel, text="Estado general del sistema", style="Seccion.TLabel"
-        ).pack(anchor="w", pady=(0, 10))
-
-        tarjetas = ttk.Frame(self._tab_panel)
-        tarjetas.pack(fill="x")
-
-        self._vars_kpi: dict[str, tk.StringVar] = {}
-        definicion = [
-            ("total_registros", "Registros leídos"),
-            ("registros_validos", "Válidos"),
-            ("registros_observados", "Observados"),
-            ("registros_pendientes", "Pendientes de área"),
-            ("registros_nuevos", "Nuevos en maestro"),
-            ("registros_actualizados", "Actualizados"),
-            ("registros_duplicados", "Duplicados"),
-            ("total_horas", "Horas registradas"),
-        ]
-        for indice, (clave, etiqueta) in enumerate(definicion):
-            var = tk.StringVar(value="0")
-            self._vars_kpi[clave] = var
-            marco = tk.Frame(
-                tarjetas,
-                bg="white",
-                highlightbackground="#DDE3EA",
-                highlightthickness=1,
-            )
-            marco.grid(
-                row=indice // 4,
-                column=indice % 4,
-                sticky="nsew",
-                padx=6,
-                pady=6,
-            )
-            tk.Label(
-                marco,
-                textvariable=var,
-                bg="white",
-                fg=COLOR_CABECERA,
-                font=("Segoe UI", 18, "bold"),
-            ).pack(anchor="w", padx=12, pady=(10, 0))
-            tk.Label(
-                marco,
-                text=etiqueta,
-                bg="white",
-                fg="#6B7280",
-                font=("Segoe UI", 8),
-            ).pack(anchor="w", padx=12, pady=(0, 10))
-        for columna in range(4):
-            tarjetas.columnconfigure(columna, weight=1)
-
-        detalle = ttk.LabelFrame(
-            self._tab_panel, text="Último procesamiento", padding=12
+        self._panel_principal = PanelPrincipal(
+            self._tab_panel,
+            on_cargar=lambda: self._cuaderno.select(self._tab_procesar),
+            on_abrir_procesado=self._abrir_procesado,
+            on_abrir_salida=lambda: _abrir(cfg.OUTPUT_DIR),
+            on_actualizar=self._refrescar_panel,
+            on_auditoria=lambda: self._cuaderno.select(self._tab_auditoria),
         )
-        detalle.pack(fill="x", pady=(12, 8))
-
-        self._vars_detalle: dict[str, tk.StringVar] = {}
-        campos = [
-            ("ultima_operacion", "Última operación"),
-            ("ultimo_id_ejecucion", "ID de ejecución"),
-            ("ultimo_archivo_entrada", "Archivo de entrada"),
-            ("ultimo_archivo_procesado", "Archivo procesado"),
-            ("ultima_hoja", "Hoja"),
-            ("ultimo_periodo", "Periodo"),
-            ("ultimo_reporte", "Último reporte"),
-        ]
-        for indice, (clave, etiqueta) in enumerate(campos):
-            var = tk.StringVar(value="—")
-            self._vars_detalle[clave] = var
-            fila = indice // 2
-            columna = (indice % 2) * 2
-            ttk.Label(detalle, text=etiqueta, style="Clave.TLabel").grid(
-                row=fila, column=columna, sticky="w", padx=(0, 8), pady=(4, 0)
-            )
-            ttk.Label(detalle, textvariable=var).grid(
-                row=fila,
-                column=columna + 1,
-                sticky="w",
-                padx=(0, 24),
-                pady=(4, 0),
-            )
-        detalle.columnconfigure(1, weight=1)
-        detalle.columnconfigure(3, weight=1)
-
-        acciones = ttk.Frame(self._tab_panel)
-        acciones.pack(fill="x", pady=(8, 0))
-        ttk.Button(
-            acciones,
-            text="Cargar archivo Excel",
-            style="Principal.TButton",
-            command=lambda: self._cuaderno.select(self._tab_procesar),
-        ).pack(side="left")
-        ttk.Button(
-            acciones,
-            text="Abrir Excel procesado",
-            command=self._abrir_procesado,
-        ).pack(side="left", padx=8)
-        ttk.Button(
-            acciones,
-            text="Abrir carpeta de salida",
-            command=lambda: _abrir(cfg.OUTPUT_DIR),
-        ).pack(side="left", padx=8)
-        ttk.Button(
-            acciones, text="Actualizar estado", command=self._refrescar_panel
-        ).pack(side="left", padx=8)
-
-        self._lbl_maestro_panel = ttk.Label(
-            self._tab_panel, text="", foreground=COLOR_CABECERA
-        )
-        self._lbl_maestro_panel.pack(anchor="w", pady=(14, 0))
-
-        self._lbl_mensajes = ttk.Label(
-            self._tab_panel, text="", foreground="#4B5563", wraplength=1000
-        )
-        self._lbl_mensajes.pack(anchor="w", pady=(4, 0))
+        self._panel_principal.pack(fill="both", expand=True)
 
     def _refrescar_panel(self) -> None:
         self._estado = svc_estado.cargar_estado()
         estado = self._estado
-        valores = {
-            "total_registros": estado.total_registros,
-            "registros_validos": estado.registros_validos,
-            "registros_observados": estado.registros_observados,
-            "registros_pendientes": estado.registros_pendientes,
-            "registros_nuevos": estado.registros_nuevos,
-            "registros_actualizados": estado.registros_actualizados,
-            "registros_duplicados": estado.registros_duplicados,
-            "total_horas": f"{estado.total_horas:,.2f}".replace(",", " "),
-        }
-        for clave, var in self._vars_kpi.items():
-            var.set(str(valores.get(clave, 0)))
+        panel = getattr(self, "_panel_principal", None)
+        if panel is None:
+            return
 
-        for clave, var in self._vars_detalle.items():
-            valor = getattr(estado, clave, "")
-            if clave in ("ultimo_archivo_entrada", "ultimo_archivo_procesado", "ultimo_reporte"):
-                valor = cfg.ruta_visible(Path(str(valor))) if valor else "—"
-            var.set(str(valor or "—"))
-
-        self._lbl_maestro_panel.configure(text=self._texto_maestro())
-        if estado.mensajes:
-            self._lbl_mensajes.configure(text=" | ".join(estado.mensajes[-4:]))
+        if estado.registros_error:
+            chip_validos = ("REVISAR", "danger")
+            detalle_validos = (
+                f"{estado.registros_observados} observados · "
+                f"{estado.registros_error} errores"
+            )
+        elif estado.total_registros > 0 and estado.ultima_operacion != "CONSOLIDACION":
+            porcentaje = estado.registros_validos / estado.total_registros * 100
+            chip_validos = (
+                f"{porcentaje:.1f} %",
+                "success" if porcentaje >= 95 else "warning",
+            )
+            detalle_validos = (
+                f"{porcentaje:.1f} % del total · "
+                f"{estado.registros_observados} observados"
+            )
+        elif estado.registros_validos:
+            chip_validos = ("VALIDADO", "success")
+            detalle_validos = (
+                f"{estado.registros_observados} observados · "
+                f"{estado.registros_error} errores"
+            )
         else:
-            self._lbl_mensajes.configure(text="")
+            chip_validos = ("SIN DATOS", "neutral")
+            detalle_validos = "Aún no hay una ejecución registrada."
+
+        panel.actualizar_kpis(
+            validos=estado.registros_validos,
+            horas=estado.total_horas,
+            pendientes=estado.registros_pendientes,
+            detalle_validos=detalle_validos,
+            detalle_horas=(
+                f"{estado.registros_duplicados} duplicados · "
+                f"{estado.registros_error} errores"
+            ),
+            detalle_pendientes=(
+                f"{estado.registros_nuevos} nuevos · "
+                f"{estado.registros_actualizados} actualizados"
+            ),
+            chip_validos=chip_validos,
+            chip_horas=(
+                ("AL DÍA", "success")
+                if estado.total_horas
+                else ("SIN DATOS", "neutral")
+            ),
+            chip_pendientes=(
+                ("REVISAR", "warning")
+                if estado.registros_pendientes
+                else ("AL DÍA", "success")
+            ),
+        )
+
+        archivo = (
+            cfg.ruta_visible(Path(estado.ultimo_archivo_procesado))
+            if estado.ultimo_archivo_procesado
+            else "—"
+        )
+        aviso = (
+            estado.mensajes[-1]
+            if estado.mensajes
+            else "Sin novedades en la última ejecución."
+        )
+        panel.actualizar_detalle(
+            archivo=archivo,
+            hoja=estado.ultima_hoja or "—",
+            periodo=estado.ultimo_periodo or "—",
+            id_ejecucion=estado.ultimo_id_ejecucion or "—",
+            aviso=aviso,
+            maestro=self._texto_maestro_corto(),
+        )
+
+        if not self._ocupado:
+            if estado.registros_error:
+                panel.set_estado_sistema("REVISAR EJECUCIÓN", "danger")
+            else:
+                panel.set_estado_sistema("SISTEMA OPERATIVO", "success")
+        panel.marcar_actualizado("Ahora mismo")
 
     def _texto_maestro(self) -> str:
         ruta = Path(cfg.MAESTRO_TICKETS_XLSX)
@@ -415,6 +572,19 @@ class AplicacionTk(tk.Tk):
             f"{estado['responsables']} responsables | "
             f"periodo {estado['periodo'] or 'sin fechas'}"
         )
+
+    def _texto_maestro_corto(self) -> str:
+        """Versión compacta para la franja del panel principal."""
+
+        texto = self._texto_maestro()
+        prefijo = "Maestro histórico: "
+        if not texto.startswith(prefijo):
+            return texto
+        partes = texto[len(prefijo) :].split(" | ")
+        resumen = "Maestro: " + partes[0]
+        if len(partes) > 1:
+            resumen += " · " + partes[1]
+        return resumen
 
     # ------------------------------------------------------------------
     # Cargar y procesar
@@ -459,33 +629,10 @@ class AplicacionTk(tk.Tk):
             wraplength=1100,
         ).pack(anchor="w", pady=(0, 6))
 
-        marco_tabla = ttk.LabelFrame(
-            self._tab_procesar, text="Vista previa (primeras filas)", padding=6
-        )
-        marco_tabla.pack(fill="both", expand=True)
-        self._tabla_preview = self._crear_tabla(
-            marco_tabla,
-            columnas=list(COLUMNAS_OFICIALES),
-            anchos={
-                "Detalle": 320,
-                "Fecha": 90,
-                "Solicitante": 150,
-                "Area": 140,
-                "Atención": 110,
-                "Requerimiento": 140,
-                "Responsable": 140,
-                "Subtipo": 120,
-                "Proyecto": 150,
-                "Horas": 60,
-                "Actividad": 100,
-            },
-            alto=9,
-        )
-
         progreso = ttk.LabelFrame(
             self._tab_procesar, text="2. Procesar y generar el Excel", padding=10
         )
-        progreso.pack(fill="x", pady=(10, 0))
+        progreso.pack(side="bottom", fill="x", pady=(10, 0))
         self._var_etapa = tk.StringVar(value="Esperando archivo validado.")
         ttk.Label(progreso, textvariable=self._var_etapa).pack(anchor="w")
         self._barra = ttk.Progressbar(progreso, mode="determinate", maximum=100)
@@ -508,6 +655,29 @@ class AplicacionTk(tk.Tk):
         ttk.Button(
             botones, text="Abrir carpeta de salida", command=lambda: _abrir(cfg.OUTPUT_DIR)
         ).pack(side="left", padx=8)
+
+        marco_tabla = ttk.LabelFrame(
+            self._tab_procesar, text="Vista previa (primeras filas)", padding=6
+        )
+        marco_tabla.pack(fill="both", expand=True)
+        self._tabla_preview = self._crear_tabla(
+            marco_tabla,
+            columnas=list(COLUMNAS_OFICIALES),
+            anchos={
+                "Detalle": 320,
+                "Fecha": 90,
+                "Solicitante": 150,
+                "Area": 140,
+                "Atención": 110,
+                "Requerimiento": 140,
+                "Responsable": 140,
+                "Subtipo": 120,
+                "Proyecto": 150,
+                "Horas": 60,
+                "Actividad": 100,
+            },
+            alto=9,
+        )
 
     def _elegir_archivo(self) -> None:
         ruta = filedialog.askopenfilename(
@@ -647,14 +817,18 @@ class AplicacionTk(tk.Tk):
     # Usuarios y áreas
     # ------------------------------------------------------------------
     def _construir_usuarios(self) -> None:
+        self._tab_usuarios.columnconfigure(0, weight=1)
+        self._tab_usuarios.rowconfigure(1, weight=3)
+        self._tab_usuarios.rowconfigure(2, weight=2)
+
         ttk.Label(
             self._tab_usuarios,
             text="Correspondencias USUARIO → ÁREA (persistentes)",
             style="Seccion.TLabel",
-        ).pack(anchor="w")
+        ).grid(row=0, column=0, sticky="w")
 
         superior = ttk.Frame(self._tab_usuarios)
-        superior.pack(fill="both", expand=True, pady=(8, 0))
+        superior.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
         superior.columnconfigure(0, weight=3)
         superior.columnconfigure(1, weight=2)
         superior.rowconfigure(0, weight=1)
@@ -679,7 +853,7 @@ class AplicacionTk(tk.Tk):
             marco_maestro,
             columnas=["USUARIO", "AREA_USUARIO"],
             anchos={"USUARIO": 230, "AREA_USUARIO": 200},
-            alto=14,
+            alto=10,
         )
         self._tabla_usuarios.bind("<<TreeviewSelect>>", self._seleccionar_usuario)
 
@@ -729,12 +903,12 @@ class AplicacionTk(tk.Tk):
             text="Usuarios pendientes detectados en el último procesamiento",
             padding=6,
         )
-        marco_pend.pack(fill="both", expand=False, pady=(10, 0))
+        marco_pend.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
         self._tabla_pendientes = self._crear_tabla(
             marco_pend,
             columnas=["Usuario", "Filas", "Área en archivo", "Sugerencia"],
             anchos={"Usuario": 250, "Filas": 60, "Área en archivo": 180, "Sugerencia": 380},
-            alto=7,
+            alto=4,
         )
         self._tabla_pendientes.bind(
             "<<TreeviewSelect>>", self._seleccionar_pendiente
@@ -923,10 +1097,27 @@ class AplicacionTk(tk.Tk):
         ttk.Label(
             self._tab_reimportar,
             textvariable=self._var_resumen_reimport,
-            foreground=COLOR_CABECERA,
+            foreground=COLOR_TEXTO,
             font=("Segoe UI", 9, "bold"),
             wraplength=1150,
         ).pack(anchor="w", pady=(8, 6))
+
+        botones = ttk.Frame(self._tab_reimportar)
+        botones.pack(side="bottom", fill="x", pady=(8, 0))
+        self._var_permitir_duplicados = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            botones,
+            text="Permitir aplicar filas marcadas como duplicadas",
+            variable=self._var_permitir_duplicados,
+        ).pack(side="left")
+        self._btn_aplicar_reimport = ttk.Button(
+            botones,
+            text="Aplicar cambios confirmados",
+            style="Principal.TButton",
+            command=self._aplicar_reimportacion,
+            state="disabled",
+        )
+        self._btn_aplicar_reimport.pack(side="right")
 
         panel = ttk.Panedwindow(self._tab_reimportar, orient="vertical")
         panel.pack(fill="both", expand=True)
@@ -960,23 +1151,6 @@ class AplicacionTk(tk.Tk):
         )
         self._texto_cambio.pack(fill="both", expand=True)
         panel.add(marco_detalle, weight=2)
-
-        botones = ttk.Frame(self._tab_reimportar)
-        botones.pack(fill="x", pady=(8, 0))
-        self._var_permitir_duplicados = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            botones,
-            text="Permitir aplicar filas marcadas como duplicadas",
-            variable=self._var_permitir_duplicados,
-        ).pack(side="left")
-        self._btn_aplicar_reimport = ttk.Button(
-            botones,
-            text="Aplicar cambios confirmados",
-            style="Principal.TButton",
-            command=self._aplicar_reimportacion,
-            state="disabled",
-        )
-        self._btn_aplicar_reimport.pack(side="right")
 
     def _elegir_corregido(self) -> None:
         ruta = filedialog.askopenfilename(
@@ -1164,7 +1338,7 @@ class AplicacionTk(tk.Tk):
             style="Seccion.TLabel",
         ).pack(anchor="w")
         self._lbl_maestro = ttk.Label(
-            self._tab_maestro, text="", foreground=COLOR_CABECERA, wraplength=1150
+            self._tab_maestro, text="", foreground=COLOR_TEXTO, wraplength=1150
         )
         self._lbl_maestro.pack(anchor="w", pady=(4, 10))
 
@@ -1651,13 +1825,26 @@ class AplicacionTk(tk.Tk):
 
     def _iniciar_ocupado(self, mensaje: str) -> None:
         self._ocupado = True
-        self._var_estado_app.set(f"Trabajando: {mensaje}")
+        texto = f"Trabajando: {mensaje}"
+        if len(texto) > 48:
+            texto = texto[:45].rstrip() + "…"
+        self._pintar_estado_app(texto, "warning")
         self.configure(cursor="watch")
+        panel = getattr(self, "_panel_principal", None)
+        if panel is not None:
+            panel.set_estado_sistema("EN PROCESO", "warning")
 
     def _terminar_ocupado(self) -> None:
         self._ocupado = False
-        self._var_estado_app.set("Listo")
+        self._pintar_estado_app("Listo", "success")
         self.configure(cursor="")
+        panel = getattr(self, "_panel_principal", None)
+        if panel is not None:
+            estado = getattr(self, "_estado", None)
+            if estado is not None and estado.registros_error:
+                panel.set_estado_sistema("REVISAR EJECUCIÓN", "danger")
+            else:
+                panel.set_estado_sistema("SISTEMA OPERATIVO", "success")
         try:
             self._barra.stop()
             self._barra.configure(mode="determinate", value=0)
@@ -1694,10 +1881,16 @@ class AplicacionTk(tk.Tk):
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.exception("Error al actualizar la interfaz")
                         self._terminar_ocupado()
+                        panel = getattr(self, "_panel_principal", None)
+                        if panel is not None:
+                            panel.set_estado_sistema("REVISAR EJECUCIÓN", "danger")
                         messagebox.showerror("Error al actualizar", str(exc))
                 elif tipo == "error":
                     descripcion, exc = contenido
                     self._terminar_ocupado()
+                    panel = getattr(self, "_panel_principal", None)
+                    if panel is not None:
+                        panel.set_estado_sistema("REVISAR EJECUCIÓN", "danger")
                     if isinstance(exc, (ErrorArchivo, ErrorEstructura, ErrorBloqueo)):
                         messagebox.showerror(
                             f"No se pudo completar: {descripcion}", str(exc)
@@ -1710,9 +1903,19 @@ class AplicacionTk(tk.Tk):
         except queue.Empty:
             pass
         finally:
-            self.after(120, self._procesar_cola)
+            try:
+                if self.winfo_exists():
+                    self._cola_after_id = self.after(120, self._procesar_cola)
+            except tk.TclError:
+                pass
 
     def destruir(self) -> None:
+        if self._cola_after_id is not None:
+            try:
+                self.after_cancel(self._cola_after_id)
+            except tk.TclError:
+                pass
+            self._cola_after_id = None
         try:
             self._barra.stop()
         except Exception:  # noqa: BLE001
