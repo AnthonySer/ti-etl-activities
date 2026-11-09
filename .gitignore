@@ -35,3 +35,5 @@ docs
 .DS_Store
 Thumbs.db
 desktop.ini
+config/configuracion_local.json
+config/configuracion_local.json.*

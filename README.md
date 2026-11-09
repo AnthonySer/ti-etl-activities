@@ -89,8 +89,11 @@ Reglas estructurales:
   duplicadas, ambiguas y ausentes. Las filas ausentes **no se eliminan**.
 - **Maestro histórico:** consolidación idempotente, control por `ID_TECNICO` y
   huella, conservación de periodos anteriores y copias de seguridad.
-- **Reportes:** indicadores generales, distribuciones, evolución semanal,
-  recurrencia y carga por responsable, en Excel con gráficos y Markdown.
+- **Reportes:** generación de Excel con la estructura demandada por el cliente:
+  exactamente cinco hojas (`RESUMEN`, `PROYECTOS`, `ACTIVIDAD`, `AREA`,
+  `DETALLE`), gráficos circulares reales sin título en las cuatro hojas
+  resumidas y detalle sin gráficos ni columnas extra. También se genera el
+  Markdown asociado.
 - **Auditoría:** registro de procesamientos, reimportaciones, consolidaciones,
   asignaciones de áreas, cambios campo a campo y restauraciones.
 - **Seguridad operativa:** bloqueo exclusivo, escritura temporal, reemplazo
@@ -174,6 +177,15 @@ Cobertura actual: esquema, ETL, procesamiento, reimportación, consolidación,
 rollback, restauración de respaldos, reportes, servicios, integridad, validación
 de septiembre y arranque de la interfaz. Resultado de la última ejecución:
 **59 pruebas, 0 fallos**.
+
+Además, la validación del reporte Excel verifica la estructura real del libro con
+`openpyxl`, confirmando:
+
+- exactamente cinco hojas;
+- nombres exactos: `RESUMEN`, `PROYECTOS`, `ACTIVIDAD`, `AREA`, `DETALLE`;
+- columnas y orden exactos por hoja;
+- cuatro gráficos circulares reales sin título y ninguno en `DETALLE`;
+- ausencia de hojas y columnas extra.
 
 ---
 
