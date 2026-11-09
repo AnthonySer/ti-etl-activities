@@ -77,7 +77,9 @@ Reglas estructurales:
 ## Funcionalidades principales
 
 - **Carga y validación:** selección de Excel, detección de hoja y encabezado,
-  vista previa, validación estructural y confirmación.
+  vista previa, validación estructural y confirmación. Al seleccionar un libro
+  nuevo se limpian la hoja y la validación anteriores; al terminar se restablece
+  el formulario sin borrar los resultados del panel ni los archivos generados.
 - **ETL:** normalización de textos, fechas, horas, nulos y usuarios; estados
   internos `VÁLIDO`, `OBSERVADO`, `PENDIENTE`, `DUPLICADO` y `ERROR` fuera del
   detalle oficial.
@@ -88,12 +90,18 @@ Reglas estructurales:
 - **Reimportación:** detección de filas nuevas, modificadas, sin cambios,
   duplicadas, ambiguas y ausentes. Las filas ausentes **no se eliminan**.
 - **Maestro histórico:** consolidación idempotente, control por `ID_TECNICO` y
-  huella, conservación de periodos anteriores y copias de seguridad.
+  huella, conservación de periodos anteriores y copias de seguridad. Incluye
+  auditoría asistida de solicitantes, coincidencias exactas y variantes posibles;
+  las equivalencias confirmadas se guardan por separado y nunca modifican los
+  nombres de origen ni fusionan tickets automáticamente.
 - **Reportes:** generación de Excel con la estructura demandada por el cliente:
   exactamente cinco hojas (`RESUMEN`, `PROYECTOS`, `ACTIVIDAD`, `AREA`,
   `DETALLE`), gráficos circulares reales sin título en las cuatro hojas
-  resumidas y detalle sin gráficos ni columnas extra. También se genera el
-  Markdown asociado.
+  resumidas y detalle sin gráficos ni columnas extra. Las cuatro tablas
+  resumidas muestran un `TOTAL GENERAL`, porcentajes almacenados como decimales
+  con formato porcentual de Excel y la hoja `DETALLE` presenta fechas como
+  `dd/mm/yyyy`. Los totales y porcentajes se recalculan al generar el reporte
+  con el conjunto de datos vigente. También se genera el Markdown asociado.
 - **Auditoría:** registro de procesamientos, reimportaciones, consolidaciones,
   asignaciones de áreas, cambios campo a campo y restauraciones.
 - **Seguridad operativa:** bloqueo exclusivo, escritura temporal, reemplazo
@@ -119,6 +127,7 @@ script automatizador/
 │  ├─ etl.py                   # Extracción y normalización
 │  ├─ procesador.py            # Orquestación del procesamiento y manifiesto
 │  ├─ procesado.py             # Escritura del Excel procesado
+│  ├─ solicitantes.py          # Detección y equivalencias asistidas de solicitantes
 │  ├─ maestro_tickets.py       # Maestro histórico y hoja CONTROL
 │  ├─ consolidacion_tickets.py # Procesado → maestro
 │  ├─ reimportacion.py         # Diferencias, clasificación y aplicación
@@ -133,7 +142,7 @@ script automatizador/
 ├─ output/                     # Excel procesados y manifiestos JSON
 ├─ reportes/                   # Reportes Excel y Markdown
 ├─ logs/                       # Log técnico rotativo
-└─ tests/test_sistema.py       # 59 pruebas automatizadas
+└─ tests/test_sistema.py       # 65 pruebas automatizadas
 ```
 
 ---
@@ -176,7 +185,7 @@ python -m unittest discover -s tests -v
 Cobertura actual: esquema, ETL, procesamiento, reimportación, consolidación,
 rollback, restauración de respaldos, reportes, servicios, integridad, validación
 de septiembre y arranque de la interfaz. Resultado de la última ejecución:
-**59 pruebas, 0 fallos**.
+**65 pruebas, 0 fallos**.
 
 Además, la validación del reporte Excel verifica la estructura real del libro con
 `openpyxl`, confirmando:
