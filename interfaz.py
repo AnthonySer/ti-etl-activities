@@ -30,6 +30,7 @@ from config.logging_config import configurar_logging
 from core import asignaciones as svc_asignaciones
 from core import auditoria
 from core import estado as svc_estado
+from core import solicitantes as svc_solicitantes
 from core.archivos import ErrorArchivo, ErrorEstructura, leer_excel
 from core.bloqueo import ErrorBloqueo, esta_bloqueado, bloqueo
 from core.consolidacion_tickets import consolidar_procesado
@@ -281,6 +282,8 @@ class AplicacionTk(tk.Tk):
         self._maestro = svc_asignaciones.cargar_maestro()
         self._preview_df: pd.DataFrame | None = None
         self._preview_info: dict[str, Any] | None = None
+        self._ruta_preview: str | None = None
+        self._solicitantes_por_iid: dict[str, dict[str, Any]] = {}
         self._ultimo_procesado: str = self._estado.ultimo_archivo_procesado
         self._ultimo_manifiesto: str = self._estado.ultimo_manifiesto
         self._reimportacion = None
@@ -833,6 +836,7 @@ class AplicacionTk(tk.Tk):
             text="Procesar archivo",
             style="Principal.TButton",
             command=self._procesar,
+            state="disabled",
         )
         self._btn_procesar.pack(side="left")
         ttk.Button(
@@ -873,8 +877,22 @@ class AplicacionTk(tk.Tk):
         )
         if not ruta:
             return
+        self._limpiar_validacion_archivo(
+            "Nuevo archivo seleccionado; valide para cargar su vista previa."
+        )
         self._var_archivo.set(ruta)
         self._previsualizar()
+
+    def _limpiar_validacion_archivo(self, mensaje: str) -> None:
+        self._preview_df = None
+        self._preview_info = None
+        self._ruta_preview = None
+        self._var_hoja.set("")
+        self._combo_hoja.configure(values=[])
+        self._btn_procesar.configure(state="disabled")
+        self._limpiar_tabla(self._tabla_preview)
+        self._var_info_preview.set(mensaje)
+        self._var_etapa.set("Esperando archivo validado.")
 
     def _previsualizar(self) -> None:
         ruta_texto = self._var_archivo.get().strip()
@@ -882,22 +900,27 @@ class AplicacionTk(tk.Tk):
             messagebox.showwarning("Sin archivo", "Seleccione primero un archivo .xlsx.")
             return
         ruta = Path(ruta_texto)
+        clave_ruta = str(ruta.resolve())
+        hoja_pedida = (
+            self._var_hoja.get() or None
+            if self._ruta_preview == clave_ruta
+            else None
+        )
         try:
-            info = previsualizar(ruta, hoja=self._var_hoja.get() or None)
+            info = previsualizar(ruta, hoja=hoja_pedida)
         except (ErrorArchivo, ErrorEstructura) as exc:
-            self._preview_df = None
-            self._preview_info = None
-            self._limpiar_tabla(self._tabla_preview)
-            self._var_info_preview.set(f"Archivo no válido: {exc}")
+            self._limpiar_validacion_archivo(f"Archivo no válido: {exc}")
             self._var_etapa.set("Corrija el archivo antes de procesar.")
             messagebox.showerror("Estructura no válida", str(exc))
             return
         except Exception as exc:  # noqa: BLE001
+            self._limpiar_validacion_archivo(f"No se pudo leer el archivo: {exc}")
             messagebox.showerror("Error al leer el archivo", str(exc))
             return
 
         self._preview_info = info
         self._preview_df = info["vista"]
+        self._ruta_preview = clave_ruta
         self._combo_hoja.configure(values=info["hojas"])
         self._var_hoja.set(info["hoja"])
 
@@ -910,7 +933,12 @@ class AplicacionTk(tk.Tk):
         if faltantes:
             detalle += " | FALTAN: " + ", ".join(faltantes)
         self._var_info_preview.set(detalle)
-        self._var_etapa.set("Estructura validada. Puede procesar el archivo.")
+        if faltantes:
+            self._var_etapa.set("Faltan columnas obligatorias; no se puede procesar.")
+            self._btn_procesar.configure(state="disabled")
+        else:
+            self._var_etapa.set("Estructura validada. Puede procesar el archivo.")
+            self._btn_procesar.configure(state="normal")
 
         self._limpiar_tabla(self._tabla_preview)
         for _, fila in self._preview_df.head(30).iterrows():
@@ -926,12 +954,19 @@ class AplicacionTk(tk.Tk):
         if not ruta_texto:
             messagebox.showwarning("Sin archivo", "Seleccione un archivo .xlsx.")
             return
-        if self._preview_info is None:
+        clave_ruta = str(Path(ruta_texto).resolve())
+        if self._preview_info is None or self._ruta_preview != clave_ruta:
             self._previsualizar()
         if self._preview_info is None:
             return
+        if self._preview_info.get("faltantes"):
+            messagebox.showerror(
+                "Estructura no válida",
+                "El archivo no contiene todas las columnas oficiales requeridas.",
+            )
+            return
         ruta = Path(ruta_texto)
-        hoja = self._var_hoja.get() or None
+        hoja = self._preview_info["hoja"]
 
         self._iniciar_ocupado("Procesando archivo…")
         self._barra.configure(mode="indeterminate")
@@ -977,8 +1012,15 @@ class AplicacionTk(tk.Tk):
         self._refrescar_panel()
         self._refrescar_pendientes()
         self._refrescar_maestro()
+        self._refrescar_solicitantes(
+            ruta_adicional=Path(estadisticas.archivo_salida)
+        )
         self._refrescar_auditoria()
         self._terminar_ocupado()
+        self._var_archivo.set("")
+        self._limpiar_validacion_archivo(
+            "Procesamiento finalizado. Seleccione otro Excel para continuar."
+        )
         messagebox.showinfo(
             "Procesamiento completado",
             "Se generó el Excel con las 11 columnas oficiales.\n\n"
@@ -1551,12 +1593,71 @@ class AplicacionTk(tk.Tk):
             command=self._abrir_maestro,
         ).pack(side="left", padx=8)
 
+        marco_solicitantes = ttk.LabelFrame(
+            self._tab_maestro,
+            text="Detección y normalización de solicitantes",
+            padding=8,
+        )
+        marco_solicitantes.pack(fill="both", expand=False, pady=(12, 0))
+        self._tabla_solicitantes = self._crear_tabla(
+            marco_solicitantes,
+            columnas=[
+                "Solicitante detectado",
+                "Posible coincidencia",
+                "Tickets",
+                "Nivel de coincidencia",
+                "Acción",
+            ],
+            anchos={
+                "Solicitante detectado": 240,
+                "Posible coincidencia": 240,
+                "Tickets": 70,
+                "Nivel de coincidencia": 170,
+                "Acción": 140,
+            },
+            alto=5,
+        )
+        barra_solicitantes = ttk.Frame(marco_solicitantes)
+        barra_solicitantes.pack(fill="x", pady=(6, 0))
+        ttk.Button(
+            barra_solicitantes,
+            text="Auditar solicitantes",
+            command=self._refrescar_solicitantes,
+        ).pack(side="left")
+        ttk.Button(
+            barra_solicitantes,
+            text="Unificar con coincidencia",
+            command=self._unificar_solicitante_seleccionado,
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            barra_solicitantes,
+            text="Mantener separados",
+            command=self._separar_solicitante_seleccionado,
+        ).pack(side="left")
+        ttk.Button(
+            barra_solicitantes,
+            text="Dejar pendiente",
+            command=self._pendiente_solicitante_seleccionado,
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            barra_solicitantes,
+            text="Revertir equivalencia",
+            command=self._revertir_solicitante_seleccionado,
+        ).pack(side="left")
+        self._var_info_solicitantes = tk.StringVar(value="")
+        ttk.Label(
+            marco_solicitantes,
+            textvariable=self._var_info_solicitantes,
+            foreground="#6B7280",
+            wraplength=1100,
+        ).pack(anchor="w", pady=(5, 0))
+
         marco_copias = ttk.LabelFrame(
             self._tab_maestro,
             text="Copias de seguridad del maestro (restauración)",
             padding=8,
         )
-        marco_copias.pack(fill="both", expand=True, pady=(14, 0))
+        marco_copias.pack(fill="both", expand=True, pady=(10, 0))
         self._lista_copias = tk.Listbox(
             marco_copias, font=("Consolas", 9), height=12
         )
@@ -1595,6 +1696,147 @@ class AplicacionTk(tk.Tk):
             return
         self._lbl_maestro.configure(text=self._texto_maestro())
         self._refrescar_copias()
+        self._refrescar_solicitantes()
+
+    def _refrescar_solicitantes(self, ruta_adicional: Path | None = None) -> None:
+        if not hasattr(self, "_tabla_solicitantes"):
+            return
+        try:
+            ruta_maestro = Path(cfg.MAESTRO_TICKETS_XLSX)
+            maestro = (
+                MaestroTickets.cargar(ruta_maestro).a_dataframe()
+                if ruta_maestro.exists()
+                else pd.DataFrame(columns=list(COLUMNAS_OFICIALES))
+            )
+            adicionales = None
+            if ruta_adicional is not None and Path(ruta_adicional).is_file():
+                try:
+                    adicionales = leer_excel(
+                        ruta_adicional, sheet_name=cfg.HOJA_DETALLE
+                    )
+                except ErrorArchivo:
+                    adicionales = leer_excel(ruta_adicional)
+            filas = svc_solicitantes.detectar_solicitantes(maestro, adicionales)
+        except (ErrorArchivo, ErrorEstructura, OSError, ValueError) as exc:
+            LOGGER.error("No se pudo auditar solicitantes: %s", exc)
+            self._var_info_solicitantes.set(f"No se pudo auditar solicitantes: {exc}")
+            return
+
+        self._solicitantes_por_iid.clear()
+        self._limpiar_tabla(self._tabla_solicitantes)
+        pendientes = 0
+        genericos = 0
+        for indice, fila in enumerate(filas):
+            iid = f"solicitante-{indice}"
+            self._solicitantes_por_iid[iid] = fila
+            self._tabla_solicitantes.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    fila["solicitante"],
+                    fila["coincidencia"] or "—",
+                    fila["tickets"],
+                    fila["nivel"],
+                    fila["accion"],
+                ),
+            )
+            if fila["accion"] == "Pendiente":
+                pendientes += 1
+            if fila["generico"]:
+                genericos += 1
+        self._var_info_solicitantes.set(
+            f"{len(filas)} solicitantes revisados | "
+            f"{pendientes} coincidencias requieren decisión | "
+            f"{genericos} solicitantes genéricos protegidos. "
+            "Las sugerencias no fusionan ni modifican los nombres originales."
+        )
+
+    def _solicitante_seleccionado(self) -> dict[str, Any] | None:
+        seleccion = self._tabla_solicitantes.selection()
+        if not seleccion:
+            messagebox.showinfo(
+                "Sin selección", "Seleccione un solicitante de la tabla."
+            )
+            return None
+        return self._solicitantes_por_iid.get(seleccion[0])
+
+    def _unificar_solicitante_seleccionado(self) -> None:
+        fila = self._solicitante_seleccionado()
+        if fila is None:
+            return
+        candidato = fila["coincidencia"]
+        if not candidato:
+            messagebox.showinfo(
+                "Sin coincidencia",
+                "No existe una coincidencia para unificar. Revise la fila o mantenga el solicitante separado.",
+            )
+            return
+        if fila["generico"]:
+            messagebox.showwarning(
+                "Solicitante genérico",
+                "Los solicitantes genéricos no se pueden unificar.",
+            )
+            return
+        if not messagebox.askyesno(
+            "Confirmar equivalencia",
+            f"Se reconocerá «{fila['solicitante']}» como «{candidato}» en futuras comparaciones.\n"
+            "Los nombres del maestro y el historial de tickets no se modificarán.\n\n"
+            "¿Desea guardar esta equivalencia?",
+        ):
+            return
+        try:
+            svc_solicitantes.unificar_solicitante(fila["solicitante"], candidato)
+        except (OSError, ValueError, ErrorArchivo) as exc:
+            messagebox.showerror("No se pudo guardar la equivalencia", str(exc))
+            return
+        self._refrescar_solicitantes()
+        self._refrescar_auditoria()
+
+    def _separar_solicitante_seleccionado(self) -> None:
+        fila = self._solicitante_seleccionado()
+        if fila is None:
+            return
+        candidato = fila["coincidencia"]
+        if not candidato:
+            messagebox.showinfo(
+                "Sin coincidencia",
+                "No hay una coincidencia que deba mantenerse separada.",
+            )
+            return
+        try:
+            svc_solicitantes.mantener_separados(fila["solicitante"], candidato)
+        except (OSError, ValueError, ErrorArchivo) as exc:
+            messagebox.showerror("No se pudo guardar la decisión", str(exc))
+            return
+        self._refrescar_solicitantes()
+        self._refrescar_auditoria()
+
+    def _pendiente_solicitante_seleccionado(self) -> None:
+        fila = self._solicitante_seleccionado()
+        if fila is None:
+            return
+        try:
+            svc_solicitantes.dejar_pendiente(
+                fila["solicitante"], fila["coincidencia"]
+            )
+        except (OSError, ValueError, ErrorArchivo) as exc:
+            messagebox.showerror("No se pudo guardar la decisión", str(exc))
+            return
+        self._refrescar_solicitantes()
+        self._refrescar_auditoria()
+
+    def _revertir_solicitante_seleccionado(self) -> None:
+        fila = self._solicitante_seleccionado()
+        if fila is None:
+            return
+        try:
+            svc_solicitantes.revertir_equivalencia(fila["solicitante"])
+        except (OSError, ValueError, ErrorArchivo) as exc:
+            messagebox.showerror("No se pudo revertir la equivalencia", str(exc))
+            return
+        self._refrescar_solicitantes()
+        self._refrescar_auditoria()
 
     def _copias(self) -> list[Path]:
         if not cfg.BACKUPS_DIR.exists():
@@ -1643,6 +1885,22 @@ class AplicacionTk(tk.Tk):
             "de seguridad antes de escribir.\n\n"
             f"Archivo: {ruta.name}\n\n¿Desea continuar?",
         ):
+            return
+
+        self._refrescar_solicitantes(ruta_adicional=ruta)
+        por_revisar = [
+            fila
+            for fila in self._solicitantes_por_iid.values()
+            if fila["accion"] == "Pendiente"
+            and fila["nivel"] in {"Coincidencia exacta", "Posible coincidencia"}
+        ]
+        if por_revisar and messagebox.askyesno(
+            "Revisar solicitantes",
+            f"Hay {len(por_revisar)} solicitantes con coincidencias que aún no tienen decisión.\n"
+            "¿Desea revisar la tabla del maestro histórico antes de consolidar?\n\n"
+            "Si elige No, se continuará sin fusionar ningún nombre.",
+        ):
+            self._cuaderno.select(self._tab_maestro)
             return
 
         self._iniciar_ocupado("Consolidando en el maestro histórico…")

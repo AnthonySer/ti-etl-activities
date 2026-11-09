@@ -17,6 +17,7 @@ import tempfile
 import unittest
 from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pandas as pd
@@ -30,6 +31,7 @@ from config import configuracion as cfg  # noqa: E402
 from core import asignaciones as svc_asignaciones  # noqa: E402
 from core import auditoria  # noqa: E402
 from core import estado as svc_estado  # noqa: E402
+from core import solicitantes as svc_solicitantes  # noqa: E402
 from core.archivos import ErrorArchivo, ErrorEstructura, leer_excel  # noqa: E402
 from core.bloqueo import BloqueoSistema, ErrorBloqueo, esta_bloqueado  # noqa: E402
 from core.consolidacion_tickets import consolidar_procesado  # noqa: E402
@@ -882,7 +884,7 @@ class PruebasReportes(BaseTemporal):
             [
                 {
                     C_DETALLE: "ERROR IMPRESORA",
-                    C_FECHA: date(2026, 9, 1),
+                    C_FECHA: datetime(2026, 9, 1),
                     C_SOLICITANTE: "ANA TORRES",
                     C_AREA: "SISTEMAS",
                     C_ATENCION: "Mesa de Ayuda",
@@ -895,7 +897,7 @@ class PruebasReportes(BaseTemporal):
                 },
                 {
                     C_DETALLE: "DESARROLLO PORTAL",
-                    C_FECHA: date(2026, 9, 2),
+                    C_FECHA: datetime(2026, 9, 2, 14, 30),
                     C_SOLICITANTE: "LUIS PEREZ",
                     C_AREA: "CONTABILIDAD",
                     C_ATENCION: "Gestion",
@@ -908,7 +910,7 @@ class PruebasReportes(BaseTemporal):
                 },
                 {
                     C_DETALLE: "AVANCE PROYECTO CRM",
-                    C_FECHA: date(2026, 9, 3),
+                    C_FECHA: datetime(2026, 9, 3),
                     C_SOLICITANTE: "PEDRO SOTO",
                     C_AREA: "SISTEMAS",
                     C_ATENCION: "Proyectos",
@@ -921,7 +923,7 @@ class PruebasReportes(BaseTemporal):
                 },
                 {
                     C_DETALLE: "CONSULTA RENDIMIENTO",
-                    C_FECHA: date(2026, 9, 4),
+                    C_FECHA: datetime(2026, 9, 4),
                     C_SOLICITANTE: "MARIA LOPEZ",
                     C_AREA: "TI",
                     C_ATENCION: "Mesa de Ayuda",
@@ -952,18 +954,135 @@ class PruebasReportes(BaseTemporal):
                 ("TIPO DE ATENCION", "TIEMPO(H)", "%"),
             )
             self.assertEqual(
-                [fila[0] for fila in libro["RESUMEN"].iter_rows(min_row=2, max_row=4, values_only=True)],
-                ["Incidencia", "Proyecto", "Solicitud"],
+                [fila[0] for fila in libro["RESUMEN"].iter_rows(min_row=2, max_row=5, values_only=True)],
+                ["Incidencia", "Proyecto", "Solicitud", "TOTAL GENERAL"],
             )
+            resumen = libro["RESUMEN"]
+            self.assertAlmostEqual(resumen["C2"].value, 3.5 / 11.5, places=6)
+            self.assertAlmostEqual(resumen["C5"].value, 1.0)
+            self.assertEqual(resumen["C2"].number_format, "0.00%")
+            self.assertEqual(resumen["B5"].value, 11.5)
+            self.assertNotIn(
+                "$A$5",
+                libro["RESUMEN"]._charts[0].series[0].cat.numRef.f,
+            )
+            self.assertEqual(libro["PROYECTOS"]["A5"].value, "TOTAL GENERAL")
+            self.assertEqual(libro["PROYECTOS"]["B5"].value, 10.0)
+            self.assertAlmostEqual(libro["PROYECTOS"]["C5"].value, 1.0)
+            self.assertEqual(libro["ACTIVIDAD"]["A5"].value, "TOTAL GENERAL")
+            self.assertEqual(libro["ACTIVIDAD"]["B5"].value, 3)
+            self.assertEqual(libro["AREA"]["A5"].value, "TOTAL GENERAL")
+            self.assertEqual(libro["AREA"]["B5"].value, 4)
             self.assertEqual(
                 next(libro["DETALLE"].iter_rows(min_row=1, max_row=1, values_only=True)),
                 ("TIPO DE ATENCION", "DETALLE", "FECHA", "USUARIO", "AREA_USUARIO", "HORAS"),
             )
             self.assertEqual(libro["DETALLE"].max_column, 6)
+            self.assertEqual(libro["DETALLE"]["C2"].value.date(), date(2026, 9, 1))
+            self.assertEqual(libro["DETALLE"]["C2"].number_format, "dd/mm/yyyy")
+            self.assertEqual(libro["DETALLE"]["C3"].value.hour, 14)
+            self.assertEqual(libro["DETALLE"]["C3"].number_format, "dd/mm/yyyy")
             self.assertEqual(len(libro["DETALLE"]._charts), 0)
             for nombre in ("RESUMEN", "PROYECTOS", "ACTIVIDAD", "AREA"):
                 self.assertEqual(len(libro[nombre]._charts), 1)
                 self.assertIsNone(libro[nombre]._charts[0].title)
+                self.assertEqual(
+                    libro[nombre].cell(row=libro[nombre].max_row, column=3).number_format,
+                    "0.00%",
+                )
+                porcentaje = sum(
+                    libro[nombre].cell(row=fila, column=3).value
+                    for fila in range(2, libro[nombre].max_row)
+                )
+                self.assertAlmostEqual(porcentaje, 1.0, places=5)
+        finally:
+            libro.close()
+
+    def test_tablas_recalculan_totales_al_generar_con_datos_actualizados(self) -> None:
+        df = pd.DataFrame(
+            [
+                {
+                    C_DETALLE: "TICKET A",
+                    C_FECHA: date(2026, 9, 1),
+                    C_SOLICITANTE: "ANA",
+                    C_AREA: "SISTEMAS",
+                    C_ATENCION: "Mesa de Ayuda",
+                    C_REQUERIMIENTO: "Soporte",
+                    C_RESPONSABLE: "CIRO",
+                    C_SUBTIPO: "Hardware",
+                    C_PROYECTO: "PLANTA",
+                    C_HORAS: 2.0,
+                    C_ACTIVIDAD: "Incidencia",
+                },
+                {
+                    C_DETALLE: "TICKET B",
+                    C_FECHA: date(2026, 9, 2),
+                    C_SOLICITANTE: "LUIS",
+                    C_AREA: "CONTABILIDAD",
+                    C_ATENCION: "Gestion",
+                    C_REQUERIMIENTO: "Consulta",
+                    C_RESPONSABLE: "PAUL",
+                    C_SUBTIPO: "Software",
+                    C_PROYECTO: "PORTAL",
+                    C_HORAS: 2.0,
+                    C_ACTIVIDAD: "Solicitud",
+                },
+            ]
+        )
+        salida = self.raiz / "reportes" / "dinamico.xlsx"
+        from core.procesado import escribir_reporte_excel
+
+        escribir_reporte_excel(df, salida, {}, {})
+        primera = load_workbook(salida, data_only=True)
+        try:
+            self.assertAlmostEqual(primera["RESUMEN"]["C2"].value, 0.5)
+            self.assertEqual(primera["AREA"]["B4"].value, 2)
+        finally:
+            primera.close()
+
+        df.loc[0, C_HORAS] = 6.0
+        escribir_reporte_excel(df, salida, {}, {})
+        segunda = load_workbook(salida, data_only=True)
+        try:
+            self.assertAlmostEqual(segunda["RESUMEN"]["C2"].value, 0.75)
+            self.assertEqual(segunda["RESUMEN"]["B4"].value, 8.0)
+            self.assertAlmostEqual(segunda["PROYECTOS"]["C2"].value, 0.75)
+        finally:
+            segunda.close()
+
+    def test_reporte_maneja_horas_y_categorias_vacias_sin_perder_tickets(self) -> None:
+        df = pd.DataFrame(
+            [
+                {
+                    C_DETALLE: "TICKET SIN CATEGORÍA",
+                    C_FECHA: None,
+                    C_SOLICITANTE: "ANA",
+                    C_AREA: None,
+                    C_ATENCION: "Mesa de Ayuda",
+                    C_REQUERIMIENTO: None,
+                    C_RESPONSABLE: "CIRO",
+                    C_SUBTIPO: "Hardware",
+                    C_PROYECTO: None,
+                    C_HORAS: None,
+                    C_ACTIVIDAD: "Incidencia",
+                }
+            ]
+        )
+        salida = self.raiz / "reportes" / "sin_valores.xlsx"
+        from core.procesado import escribir_reporte_excel
+
+        escribir_reporte_excel(df, salida, {}, {})
+        libro = load_workbook(salida)
+        try:
+            self.assertEqual(libro["RESUMEN"]["B3"].value, 0)
+            self.assertEqual(libro["RESUMEN"]["C3"].value, 0)
+            self.assertEqual(libro["PROYECTOS"]["A2"].value, "TOTAL GENERAL")
+            self.assertEqual(libro["PROYECTOS"]["B2"].value, 0)
+            self.assertEqual(libro["ACTIVIDAD"]["A2"].value, "Sin requerimiento")
+            self.assertEqual(libro["ACTIVIDAD"]["B3"].value, 1)
+            self.assertEqual(libro["AREA"]["A2"].value, "Sin área")
+            self.assertEqual(libro["AREA"]["B3"].value, 1)
+            self.assertIsNone(libro["DETALLE"]["C2"].value)
         finally:
             libro.close()
 
@@ -1002,6 +1121,113 @@ class PruebasReportes(BaseTemporal):
         indicadores = calcular_indicadores(df)
         self.assertIn("SLA", indicadores["Nota"])
         self.assertIn("esfuerzo declarado", indicadores["Nota"])
+
+
+class PruebasSolicitantes(BaseTemporal):
+    def setUp(self) -> None:
+        super().setUp()
+        self.ruta_equivalencias = cfg.DATA_DIR / "solicitantes_equivalencias.json"
+
+    def _datos(self) -> tuple[pd.DataFrame, pd.DataFrame]:
+        maestro = pd.DataFrame(
+            {
+                C_SOLICITANTE: [
+                    "ANA TORRES",
+                    "ANA TORRES",
+                    "ANA TORRES",
+                    "CARMEN DIAZ",
+                    "DEIVID DOMINGUEZ",
+                    "SISTEMAS SERVIAM",
+                    "SISTEMAS SERVIAM",
+                    "ALICORP",
+                    "José  López",
+                ]
+            }
+        )
+        adicionales = pd.DataFrame(
+            {C_SOLICITANTE: ["CARMEN DIAS", "DEYVI", "JOSE LOPEZ"]}
+        )
+        return maestro, adicionales
+
+    def test_detecta_variantes_exactas_posibles_y_genericos_sin_fusionar_tickets(self) -> None:
+        maestro, adicionales = self._datos()
+        filas = svc_solicitantes.detectar_solicitantes(maestro, adicionales)
+        por_nombre = {fila["solicitante"]: fila for fila in filas}
+
+        self.assertEqual(por_nombre["ANA TORRES"]["tickets"], 3)
+        self.assertEqual(
+            sum(fila["solicitante"] == "ANA TORRES" for fila in filas), 1
+        )
+        self.assertEqual(por_nombre["CARMEN DIAS"]["nivel"], "Posible coincidencia")
+        self.assertEqual(por_nombre["CARMEN DIAS"]["coincidencia"], "CARMEN DIAZ")
+        self.assertEqual(por_nombre["DEYVI"]["nivel"], "Posible coincidencia")
+        self.assertEqual(por_nombre["SISTEMAS SERVIAM"]["coincidencia"], "")
+        self.assertEqual(por_nombre["ALICORP"]["accion"], "Mantener separado")
+        sylvana = svc_solicitantes.detectar_solicitantes(
+            pd.DataFrame({C_SOLICITANTE: ["SYLVANA VIDURRIZA"]}),
+            pd.DataFrame({C_SOLICITANTE: ["LUDURRIZAGA"]}),
+        )
+        self.assertEqual(sylvana[0]["nivel"], "Posible coincidencia")
+        jose = next(fila for fila in filas if fila["clave"] == "JOSE LOPEZ")
+        self.assertEqual(jose["nivel"], "Coincidencia exacta")
+        self.assertEqual(jose["tickets"], 1)
+
+    def test_persistencia_reversion_separacion_y_auditoria_de_equivalencias(self) -> None:
+        maestro, adicionales = self._datos()
+        original = adicionales.copy(deep=True)
+
+        svc_solicitantes.unificar_solicitante(
+            "CARMEN DIAS",
+            "CARMEN DIAZ",
+            ruta_equivalencias=self.ruta_equivalencias,
+        )
+        self.assertEqual(
+            svc_solicitantes.resolver_canonico(
+                "CARMEN DIAS", self.ruta_equivalencias
+            ),
+            "CARMEN DIAZ",
+        )
+        unificada = svc_solicitantes.detectar_solicitantes(
+            maestro, adicionales, ruta_equivalencias=self.ruta_equivalencias
+        )
+        self.assertEqual(
+            next(f for f in unificada if f["solicitante"] == "CARMEN DIAS")["accion"],
+            "Unificado",
+        )
+
+        svc_solicitantes.revertir_equivalencia(
+            "CARMEN DIAS", ruta_equivalencias=self.ruta_equivalencias
+        )
+        svc_solicitantes.mantener_separados(
+            "CARMEN DIAS",
+            "CARMEN DIAZ",
+            ruta_equivalencias=self.ruta_equivalencias,
+        )
+        separadas = svc_solicitantes.detectar_solicitantes(
+            maestro, adicionales, ruta_equivalencias=self.ruta_equivalencias
+        )
+        self.assertEqual(
+            next(f for f in separadas if f["solicitante"] == "CARMEN DIAS")[
+                "coincidencia"
+            ],
+            "",
+        )
+
+        svc_solicitantes.dejar_pendiente(
+            "DEYVI",
+            "DEIVID DOMINGUEZ",
+            ruta_equivalencias=self.ruta_equivalencias,
+        )
+        pendientes = svc_solicitantes.detectar_solicitantes(
+            maestro, adicionales, ruta_equivalencias=self.ruta_equivalencias
+        )
+        self.assertEqual(
+            next(f for f in pendientes if f["solicitante"] == "DEYVI")["accion"],
+            "Pendiente revisado",
+        )
+        pd.testing.assert_frame_equal(adicionales, original)
+        tipos = auditoria.cargar_auditoria()["TIPO"].tolist()
+        self.assertEqual(tipos.count("EQUIVALENCIA_SOLICITANTE"), 4)
 
 
 # ---------------------------------------------------------------------------
@@ -1184,6 +1410,16 @@ class PruebasIntegridad(BaseTemporal):
 # Interfaz
 # ---------------------------------------------------------------------------
 class PruebasInterfaz(BaseTemporal):
+    class _Variable:
+        def __init__(self, value: str = "") -> None:
+            self.value = value
+
+        def get(self) -> str:
+            return self.value
+
+        def set(self, value: str) -> None:
+            self.value = value
+
     def test_ventana_principal(self) -> None:
         try:
             import tkinter as tk
@@ -1202,6 +1438,107 @@ class PruebasInterfaz(BaseTemporal):
             self.assertTrue(app._tabla_preview["columns"])
         finally:
             app.destruir()
+
+    def test_seleccion_nueva_limpia_hoja_anterior_y_cancelar_conserva_estado(self) -> None:
+        import interfaz
+
+        app = interfaz.AplicacionTk.__new__(interfaz.AplicacionTk)
+        app._var_archivo = self._Variable("anterior.xlsx")
+        app._var_hoja = self._Variable("Hoja anterior")
+        app._var_info_preview = self._Variable("vista previa anterior")
+        app._var_etapa = self._Variable("Validado")
+        app._combo_hoja = mock.MagicMock()
+        app._btn_procesar = mock.MagicMock()
+        app._tabla_preview = mock.MagicMock()
+        app._tabla_preview.get_children.return_value = ["fila-anterior"]
+        app._preview_df = pd.DataFrame({"anterior": [1]})
+        app._preview_info = {"hoja": "Hoja anterior"}
+        app._ruta_preview = str((self.raiz / "anterior.xlsx").resolve())
+
+        with (
+            mock.patch("interfaz.filedialog.askopenfilename", return_value=""),
+            mock.patch.object(app, "_previsualizar") as previsualizar_mock,
+        ):
+            app._elegir_archivo()
+        self.assertEqual(app._var_archivo.get(), "anterior.xlsx")
+        self.assertEqual(app._var_hoja.get(), "Hoja anterior")
+        self.assertIsNotNone(app._preview_info)
+        previsualizar_mock.assert_not_called()
+
+        info = {
+            "hoja": "Hoja nueva",
+            "hojas": ["Hoja nueva", "Otra hoja"],
+            "indice_encabezado": 0,
+            "columnas_reconocidas": {columna: [columna] for columna in COLUMNAS_OFICIALES},
+            "faltantes": [],
+            "vista": pd.DataFrame(columns=list(COLUMNAS_OFICIALES)),
+        }
+        archivo_nuevo = str(self.raiz / "nuevo.xlsx")
+        with (
+            mock.patch(
+                "interfaz.filedialog.askopenfilename",
+                return_value=archivo_nuevo,
+            ),
+            mock.patch("interfaz.previsualizar", return_value=info) as preview,
+        ):
+            app._elegir_archivo()
+        preview.assert_called_once_with(Path(archivo_nuevo), hoja=None)
+        self.assertEqual(app._var_hoja.get(), "Hoja nueva")
+        self.assertEqual(app._preview_info, info)
+        app._btn_procesar.configure.assert_called_with(state="normal")
+
+    def test_fin_procesamiento_limpia_controles_y_conserva_ultimo_archivo(self) -> None:
+        import interfaz
+
+        app = interfaz.AplicacionTk.__new__(interfaz.AplicacionTk)
+        app._barra = mock.MagicMock()
+        app._var_archivo = self._Variable("entrada.xlsx")
+        app._var_hoja = self._Variable("Hoja 1")
+        app._var_info_preview = self._Variable("validado")
+        app._var_etapa = self._Variable("Procesando")
+        app._var_contadores = self._Variable("")
+        app._combo_hoja = mock.MagicMock()
+        app._btn_procesar = mock.MagicMock()
+        app._tabla_preview = mock.MagicMock()
+        app._tabla_preview.get_children.return_value = ["fila"]
+        app._preview_df = pd.DataFrame({"dato": [1]})
+        app._preview_info = {"hoja": "Hoja 1"}
+        app._ruta_preview = str((self.raiz / "entrada.xlsx").resolve())
+        app._refrescar_panel = mock.MagicMock()
+        app._refrescar_pendientes = mock.MagicMock()
+        app._refrescar_maestro = mock.MagicMock()
+        app._refrescar_solicitantes = mock.MagicMock()
+        app._refrescar_auditoria = mock.MagicMock()
+        app._terminar_ocupado = mock.MagicMock()
+        salida = self.raiz / "output" / "procesado.xlsx"
+        estadisticas = SimpleNamespace(
+            archivo_salida=str(salida),
+            archivo_manifiesto="",
+            archivo_entrada="entrada.xlsx",
+            registros_totales=2,
+            registros_validos=2,
+            registros_observados=0,
+            registros_pendientes=0,
+            registros_duplicados=0,
+            registros_error=0,
+        )
+
+        with (
+            mock.patch("interfaz.svc_estado.actualizar_desde_estadisticas"),
+            mock.patch("interfaz.messagebox.showinfo"),
+            mock.patch("interfaz.messagebox.showwarning"),
+        ):
+            app._fin_procesar(estadisticas)
+
+        self.assertEqual(app._ultimo_procesado, str(salida))
+        self.assertEqual(app._var_archivo.get(), "")
+        self.assertEqual(app._var_hoja.get(), "")
+        self.assertIsNone(app._preview_info)
+        self.assertIsNone(app._preview_df)
+        self.assertIsNone(app._ruta_preview)
+        app._combo_hoja.configure.assert_called_with(values=[])
+        app._btn_procesar.configure.assert_called_with(state="disabled")
+        app._tabla_preview.delete.assert_called_once_with("fila")
 
 
 if __name__ == "__main__":

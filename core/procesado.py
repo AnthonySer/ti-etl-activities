@@ -520,8 +520,21 @@ def _tabla_resumen(df: pd.DataFrame) -> pd.DataFrame:
         if not mask.any():
             continue
         total = float(horas[mask].sum())
-        porcentaje = 0.0 if total_horas == 0 else (total / total_horas) * 100
-        filas.append({"TIPO DE ATENCION": categoria, "TIEMPO(H)": round(total, 2), "%": round(porcentaje, 2)})
+        porcentaje = 0.0 if total_horas == 0 else total / total_horas
+        filas.append(
+            {
+                "TIPO DE ATENCION": categoria,
+                "TIEMPO(H)": round(total, 2),
+                "%": round(porcentaje, 6),
+            }
+        )
+    filas.append(
+        {
+            "TIPO DE ATENCION": "TOTAL GENERAL",
+            "TIEMPO(H)": round(total_horas, 2),
+            "%": 1.0 if total_horas else 0.0,
+        }
+    )
     return pd.DataFrame(filas, columns=["TIPO DE ATENCION", "TIEMPO(H)", "%"])
 
 
@@ -529,54 +542,88 @@ def _tabla_proyectos(df: pd.DataFrame) -> pd.DataFrame:
     validos = df[[C_PROYECTO, C_HORAS]].copy()
     validos = validos[validos[C_PROYECTO].notna()]
     validos[C_PROYECTO] = validos[C_PROYECTO].astype(str).str.strip()
-    validos = validos[validos[C_PROYECTO].ne("") & validos[C_PROYECTO].ne("nan")]
-    if validos.empty:
-        return pd.DataFrame(columns=["PROYECTOS", "TIEMPO(H)", "%"])
+    clave_proyecto = validos[C_PROYECTO].str.casefold()
+    validos = validos[
+        ~clave_proyecto.isin({"", "nan", "none", "null", "n/a"})
+    ]
     validos[C_HORAS] = pd.to_numeric(validos[C_HORAS], errors="coerce").fillna(0.0)
     total = float(validos[C_HORAS].sum())
-    agrupado = validos.groupby(C_PROYECTO, sort=False)[C_HORAS].sum().reset_index()
-    agrupado.columns = ["PROYECTOS", "TIEMPO(H)"]
-    agrupado["%"] = agrupado["TIEMPO(H)"].apply(
-        lambda valor: 0.0 if total == 0 else (valor / total) * 100
+    if validos.empty:
+        filas = []
+    else:
+        agrupado = validos.groupby(C_PROYECTO, sort=False)[C_HORAS].sum().reset_index()
+        agrupado.columns = ["PROYECTOS", "TIEMPO(H)"]
+        agrupado["%"] = agrupado["TIEMPO(H)"].apply(
+            lambda valor: 0.0 if total == 0 else valor / total
+        )
+        agrupado["TIEMPO(H)"] = agrupado["TIEMPO(H)"].round(2)
+        agrupado["%"] = agrupado["%"].round(6)
+        filas = agrupado.to_dict(orient="records")
+    filas.append(
+        {
+            "PROYECTOS": "TOTAL GENERAL",
+            "TIEMPO(H)": round(total, 2),
+            "%": 1.0 if total else 0.0,
+        }
     )
-    agrupado["TIEMPO(H)"] = agrupado["TIEMPO(H)"].round(2)
-    agrupado["%"] = agrupado["%"].round(2)
-    return agrupado.loc[:, ["PROYECTOS", "TIEMPO(H)", "%"]]
+    return pd.DataFrame(filas, columns=["PROYECTOS", "TIEMPO(H)", "%"])
 
 
 def _tabla_actividad(df: pd.DataFrame) -> pd.DataFrame:
     filtrado = df[[C_ACTIVIDAD, C_REQUERIMIENTO]].copy()
     filtrado = filtrado[filtrado[C_ACTIVIDAD].map(_categoria_actividad).isin({"Incidencia", "Solicitud"})]
-    filtrado = filtrado[filtrado[C_REQUERIMIENTO].fillna("").astype(str).str.strip().ne("")]
-    if filtrado.empty:
-        return pd.DataFrame(columns=["TIPO DE ACTIVIDAD", "TICKETS", "%"])
-    agrupado = filtrado.groupby(C_REQUERIMIENTO, sort=False).size().reset_index(name="TICKETS")
-    total = int(agrupado["TICKETS"].sum())
-    agrupado["%"] = agrupado["TICKETS"].apply(
-        lambda cantidad: 0.0 if total == 0 else (cantidad / total) * 100
+    requerimientos = filtrado[C_REQUERIMIENTO].fillna("").astype(str).str.strip()
+    sin_requerimiento = requerimientos.str.casefold().isin(
+        {"", "nan", "none", "null", "n/a"}
     )
-    agrupado = agrupado.rename(columns={C_REQUERIMIENTO: "TIPO DE ACTIVIDAD"})
-    agrupado["TICKETS"] = agrupado["TICKETS"].astype(int)
-    agrupado["%"] = agrupado["%"].round(2)
-    agrupado = agrupado.sort_values(["TICKETS", "TIPO DE ACTIVIDAD"], ascending=[False, True])
-    return agrupado.loc[:, ["TIPO DE ACTIVIDAD", "TICKETS", "%"]].reset_index(drop=True)
+    filtrado[C_REQUERIMIENTO] = requerimientos.mask(
+        sin_requerimiento, "Sin requerimiento"
+    )
+    if filtrado.empty:
+        filas = []
+        total = 0
+    else:
+        agrupado = filtrado.groupby(C_REQUERIMIENTO, sort=False).size().reset_index(name="TICKETS")
+        total = int(agrupado["TICKETS"].sum())
+        agrupado["%"] = agrupado["TICKETS"].apply(
+            lambda cantidad: 0.0 if total == 0 else cantidad / total
+        )
+        agrupado = agrupado.rename(columns={C_REQUERIMIENTO: "TIPO DE ACTIVIDAD"})
+        agrupado["TICKETS"] = agrupado["TICKETS"].astype(int)
+        agrupado["%"] = agrupado["%"].round(6)
+        agrupado = agrupado.sort_values(["TICKETS", "TIPO DE ACTIVIDAD"], ascending=[False, True])
+        filas = agrupado.to_dict(orient="records")
+    filas.append(
+        {
+            "TIPO DE ACTIVIDAD": "TOTAL GENERAL",
+            "TICKETS": total,
+            "%": 1.0 if total else 0.0,
+        }
+    )
+    return pd.DataFrame(filas, columns=["TIPO DE ACTIVIDAD", "TICKETS", "%"])
 
 
 def _tabla_area(df: pd.DataFrame) -> pd.DataFrame:
     areas = df[[C_AREA]].copy()
-    areas = areas[areas[C_AREA].fillna("").astype(str).str.strip().ne("")]
+    valores_area = areas[C_AREA].fillna("").astype(str).str.strip()
+    sin_area = valores_area.str.casefold().isin({"", "nan", "none", "null", "n/a"})
+    areas[C_AREA] = valores_area.mask(sin_area, "Sin área")
     if areas.empty:
-        return pd.DataFrame(columns=["ÁREAS", "TICKETS", "%"])
-    agrupado = areas.groupby(C_AREA, sort=False).size().reset_index(name="TICKETS")
-    total = int(agrupado["TICKETS"].sum())
-    agrupado["%"] = agrupado["TICKETS"].apply(
-        lambda cantidad: 0.0 if total == 0 else (cantidad / total) * 100
-    )
-    agrupado = agrupado.rename(columns={C_AREA: "ÁREAS"})
-    agrupado["TICKETS"] = agrupado["TICKETS"].astype(int)
-    agrupado["%"] = agrupado["%"].round(2)
-    agrupado = agrupado.sort_values(["TICKETS", "ÁREAS"], ascending=[False, True])
-    return agrupado.loc[:, ["ÁREAS", "TICKETS", "%"]].reset_index(drop=True)
+        filas = []
+        total = 0
+    else:
+        agrupado = areas.groupby(C_AREA, sort=False).size().reset_index(name="TICKETS")
+        total = int(agrupado["TICKETS"].sum())
+        agrupado["%"] = agrupado["TICKETS"].apply(
+            lambda cantidad: 0.0 if total == 0 else cantidad / total
+        )
+        agrupado = agrupado.rename(columns={C_AREA: "ÁREAS"})
+        agrupado["TICKETS"] = agrupado["TICKETS"].astype(int)
+        agrupado["%"] = agrupado["%"].round(6)
+        agrupado = agrupado.sort_values(["TICKETS", "ÁREAS"], ascending=[False, True])
+        filas = agrupado.to_dict(orient="records")
+    filas.append({"ÁREAS": "TOTAL GENERAL", "TICKETS": total, "%": 1.0 if total else 0.0})
+    return pd.DataFrame(filas, columns=["ÁREAS", "TICKETS", "%"])
 
 
 def _tabla_detalle(df: pd.DataFrame) -> pd.DataFrame:
@@ -591,11 +638,33 @@ def _tabla_detalle(df: pd.DataFrame) -> pd.DataFrame:
             C_HORAS: "HORAS",
         }
     )
-    return detalle.loc[:, ["TIPO DE ATENCION", "DETALLE", "FECHA", "USUARIO", "AREA_USUARIO", "HORAS"]]
+    detalle = detalle.loc[
+        :,
+        ["TIPO DE ATENCION", "DETALLE", "FECHA", "USUARIO", "AREA_USUARIO", "HORAS"],
+    ].copy()
+    for columna in detalle.columns:
+        detalle[columna] = detalle[columna].map(_valor_reporte)
+    return detalle
+
+
+def _valor_reporte(valor: Any) -> Any:
+    if valor is None:
+        return None
+    try:
+        if pd.isna(valor):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(valor, pd.Timestamp):
+        return valor.to_pydatetime()
+    return valor
 
 
 def _agregar_grafico_pastel(hoja: Worksheet, tabla: pd.DataFrame) -> None:
-    if tabla is None or tabla.empty:
+    if tabla is None:
+        return
+    cantidad_categorias = max(len(tabla) - 1, 0)
+    if cantidad_categorias == 0:
         return
     grafico = PieChart()
     grafico.style = 10
@@ -603,8 +672,8 @@ def _agregar_grafico_pastel(hoja: Worksheet, tabla: pd.DataFrame) -> None:
     grafico.height = 7
     grafico.width = 11
 
-    datos = Reference(hoja, min_col=2, min_row=1, max_row=len(tabla) + 1)
-    categorias = Reference(hoja, min_col=1, min_row=2, max_row=len(tabla) + 1)
+    datos = Reference(hoja, min_col=2, min_row=1, max_row=cantidad_categorias + 1)
+    categorias = Reference(hoja, min_col=1, min_row=2, max_row=cantidad_categorias + 1)
     grafico.add_data(datos, titles_from_data=True)
     grafico.set_categories(categorias)
     hoja.add_chart(grafico, "E2")
@@ -645,12 +714,39 @@ def escribir_reporte_excel(
             ws.column_dimensions["D"].width = 26
             ws.column_dimensions["E"].width = 22
             ws.column_dimensions["F"].width = 12
+            for fila in range(2, len(tabla) + 2):
+                celda_fecha = ws.cell(row=fila, column=3)
+                valor = celda_fecha.value
+                if isinstance(valor, pd.Timestamp):
+                    celda_fecha.value = valor.to_pydatetime()
+                    valor = celda_fecha.value
+                elif isinstance(valor, str) and valor.strip():
+                    convertido = pd.to_datetime(valor, dayfirst=True, errors="coerce")
+                    if not pd.isna(convertido):
+                        celda_fecha.value = convertido.to_pydatetime()
+                        valor = celda_fecha.value
+                if isinstance(valor, (date, datetime)):
+                    celda_fecha.number_format = "dd/mm/yyyy"
+                ws.cell(row=fila, column=6).number_format = "0.00"
             continue
 
         ws.column_dimensions["A"].width = 28
         ws.column_dimensions["B"].width = 14
         ws.column_dimensions["C"].width = 12
+        es_actividad_area = nombre_hoja in {"ACTIVIDAD", "AREA"}
+        ultima_fila_categoria = len(tabla)
         if len(tabla) > 0:
+            for fila in range(2, len(tabla) + 2):
+                ws.cell(row=fila, column=2).number_format = (
+                    "0" if es_actividad_area else "0.00"
+                )
+                ws.cell(row=fila, column=3).number_format = "0.00%"
+            total_fila = len(tabla) + 1
+            for celda in ws[total_fila]:
+                celda.font = Font(name="Segoe UI", size=9, bold=True)
+                celda.fill = PatternFill("solid", fgColor=_AZUL_CLARO)
+                celda.border = _borde_fino()
+        if ultima_fila_categoria > 1:
             _agregar_grafico_pastel(ws, tabla)
 
     libro.save(destino)
