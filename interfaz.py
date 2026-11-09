@@ -88,6 +88,173 @@ def _texto(valor: Any) -> str:
     return str(valor)
 
 
+class VentanaConfiguracion(tk.Toplevel):
+    """Ventana ligera para ajustar rutas locales sin tocar el código fuente."""
+
+    _RUTAS = [
+        ("Archivos de entrada", "input_dir", "directorio"),
+        ("Excel procesados", "output_dir", "directorio"),
+        ("Copias de revisión", "revision_dir", "directorio"),
+        ("Respaldos de procesados", "backups_dir", "directorio"),
+        ("Datos y maestros", "data_dir", "directorio"),
+        ("Reportes", "reportes_dir", "directorio"),
+        ("Auditoría", "auditoria_csv", "archivo"),
+        ("Logs", "logs_dir", "directorio"),
+    ]
+
+    def __init__(self, padre: tk.Misc) -> None:
+        super().__init__(padre)
+        self.title("Configuración")
+        self.geometry("760x500")
+        self.minsize(620, 420)
+        self.configure(bg=COLOR_FONDO)
+        self.transient(padre)
+        self.grab_set()
+
+        self._config = cfg.cargar_configuracion_local()
+        self._variables: dict[str, tk.StringVar] = {}
+
+        cabecera = ttk.Label(
+            self,
+            text="Configuración del sistema",
+            style="Seccion.TLabel",
+        )
+        cabecera.pack(anchor="w", padx=18, pady=(14, 8))
+
+        marco = ttk.Frame(self, padding=10)
+        marco.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+
+        for titulo, nombre, tipo in self._RUTAS:
+            fila = ttk.Frame(marco)
+            fila.pack(fill="x", pady=4)
+            ttk.Label(fila, text=titulo, width=22, anchor="w").pack(side="left")
+            variable = tk.StringVar(value=str(self._config.get(nombre, "")))
+            self._variables[nombre] = variable
+            ttk.Entry(fila, textvariable=variable).pack(side="left", fill="x", expand=True, padx=(8, 8))
+            ttk.Button(
+                fila,
+                text="Examinar…",
+                command=lambda n=nombre, t=tipo: self._seleccionar_ruta(n, t),
+            ).pack(side="left")
+
+        acciones = ttk.Frame(self)
+        acciones.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Button(acciones, text="Guardar", style="Principal.TButton", command=self._guardar).pack(side="right")
+        ttk.Button(acciones, text="Restaurar", command=self._restaurar).pack(side="right", padx=(0, 8))
+        ttk.Button(acciones, text="Cancelar", command=self.destroy).pack(side="right", padx=(0, 8))
+
+    def _seleccionar_ruta(self, nombre: str, tipo: str) -> None:
+        valor = self._variables[nombre].get().strip()
+        directorio_base = valor if valor else str(cfg.BASE_DIR)
+        if tipo == "archivo":
+            ruta = filedialog.askopenfilename(
+                title="Seleccione el archivo",
+                initialdir=str(Path(directorio_base).resolve() if Path(directorio_base).exists() else cfg.BASE_DIR),
+            )
+        else:
+            ruta = filedialog.askdirectory(
+                title="Seleccione la carpeta",
+                initialdir=str(Path(directorio_base).resolve() if Path(directorio_base).exists() else cfg.BASE_DIR),
+            )
+        if ruta:
+            self._variables[nombre].set(ruta)
+
+    def _colectar(self) -> dict[str, str | int]:
+        datos: dict[str, str | int] = {}
+        for nombre, variable in self._variables.items():
+            valor = variable.get().strip()
+            if nombre == "max_backups":
+                continue
+            datos[nombre] = valor
+        datos["max_backups"] = self._config.get("max_backups", 10)
+        datos["log_level"] = self._config.get("log_level", "INFO")
+        datos["formato_fecha_reporte"] = self._config.get("formato_fecha_reporte", "DD/MM/YYYY")
+        return datos
+
+    def _guardar(self) -> None:
+        try:
+            validada = cfg.guardar_configuracion_local(self._colectar())
+            cfg.aplicar_configuracion(validada)
+        except ValueError as exc:
+            messagebox.showerror("Configuración inválida", str(exc))
+            return
+        messagebox.showinfo("Configuración guardada", "Los cambios se aplicarán en la próxima operación y la aplicación puede requerir reinicio si se usaron rutas nuevas.")
+        self.destroy()
+
+    def _restaurar(self) -> None:
+        restaurada = cfg._config_por_defecto()
+        for nombre, variable in self._variables.items():
+            variable.set(str(restaurada.get(nombre, "")))
+
+
+class VentanaGuiaUso(tk.Toplevel):
+    """Guía breve en español para el flujo habitual del usuario."""
+
+    def __init__(self, padre: tk.Misc) -> None:
+        super().__init__(padre)
+        self.title("Guía rápida — Cómo trabajar con los tickets")
+        self.geometry("760x560")
+        self.minsize(620, 420)
+        self.configure(bg=COLOR_FONDO)
+        self.transient(padre)
+        self.grab_set()
+
+        cabecera = ttk.Label(self, text="Guía rápida — Cómo trabajar con los tickets", style="Seccion.TLabel")
+        cabecera.pack(anchor="w", padx=18, pady=(14, 8))
+
+        contenedor = ttk.Frame(self)
+        contenedor.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        lienzo = tk.Canvas(contenedor, bg=COLOR_FONDO, highlightthickness=0)
+        barra = ttk.Scrollbar(contenedor, orient="vertical", command=lienzo.yview)
+        marco = tk.Frame(lienzo, bg=COLOR_FONDO)
+
+        lienzo.create_window((0, 0), window=marco, anchor="nw")
+        lienzo.configure(yscrollcommand=barra.set)
+        lienzo.pack(side="left", fill="both", expand=True)
+        barra.pack(side="right", fill="y")
+
+        contenido = [
+            ("Paso 1. Cargar y validar el Excel", "Ir a Cargar y procesar. Seleccione el Excel y pulse Validar y previsualizar. Si aparecen errores críticos, corríjalos antes de continuar."),
+            ("Paso 2. Generar el Excel", "Elija Generar Excel normal o Generar Excel a detalle. El sistema conserva un archivo canónico y genera respaldos al reemplazarlo."),
+            ("Paso 3. Revisar usuarios y áreas", "Vaya a Usuarios y áreas, asigne el área a los usuarios pendientes y guarde los cambios."),
+            ("Paso 4. Revisar y corregir el Excel", "Pulse Abrir resultado; el sistema abre una copia de revisión, no el archivo canónico. Corrija solo esa copia y guárdela."),
+            ("Paso 5. Reimportar las correcciones", "Vaya a Reimportar correcciones y revise el resumen para resolver duplicados o errores antes de aplicar."),
+            ("Paso 6. Consolidar el maestro histórico", "Desde Maestro histórico, ejecute la consolidación. La operación requiere que el maestro histórico esté actualizado antes de generar reportes definitivos."),
+            ("Paso 7. Generar reportes", "Vaya a Reportes, seleccione año y mes, genere el reporte y revise las hojas RESUMEN, PROYECTOS, ACTIVIDAD, AREA y DETALLE."),
+            ("Paso 8. Consultar auditoría", "Revise el historial en Auditoría para confirmar qué se ejecutó y cuándo."),
+            ("Importante", "El Excel original nunca debe modificarse. Las correcciones pasan por la copia de revisión. No modificar el Excel maestro ni el archivo procesado al generar reportes. No cambiar el esquema oficial de 11 columnas."),
+        ]
+
+        for indice, (titulo, texto) in enumerate(contenido, start=1):
+            bloque = tk.Frame(marco, bg=COLOR_FONDO, padx=8, pady=10)
+            bloque.pack(fill="x")
+            tk.Label(
+                bloque,
+                text=f"{indice}. {titulo}",
+                bg=COLOR_FONDO,
+                fg=COLOR_TEXTO,
+                font=("Segoe UI", 11, "bold"),
+                anchor="w",
+                justify="left",
+            ).pack(anchor="w")
+            tk.Label(
+                bloque,
+                text=texto,
+                bg=COLOR_FONDO,
+                fg=COLOR_TEXTO_SECUNDARIO,
+                font=("Segoe UI", 10),
+                justify="left",
+                wraplength=650,
+                anchor="w",
+            ).pack(anchor="w", pady=(4, 0))
+
+        marco.update_idletasks()
+        lienzo.config(scrollregion=lienzo.bbox("all"))
+
+        ttk.Button(self, text="Cerrar", command=self.destroy).pack(anchor="e", padx=12, pady=(0, 12))
+
+
 def _abrir(ruta: Path | str) -> None:
     ruta = Path(ruta)
     if not ruta.exists():
@@ -382,6 +549,19 @@ class AplicacionTk(tk.Tk):
             anchor="w",
         ).pack(anchor="w")
 
+        acciones = tk.Frame(cabecera, bg=COLOR_CABECERA)
+        acciones.pack(side="right", padx=(0, 20))
+        ttk.Button(
+            acciones,
+            text="Guía de uso",
+            command=self._abrir_guia_uso,
+        ).pack(side="right", padx=(0, 8))
+        ttk.Button(
+            acciones,
+            text="Configuración",
+            command=self._abrir_configuracion,
+        ).pack(side="right")
+
         self._var_estado_app = tk.StringVar(value="Listo")
         self._badge_estado_app = tk.Frame(
             cabecera,
@@ -390,7 +570,7 @@ class AplicacionTk(tk.Tk):
             highlightthickness=1,
             bd=0,
         )
-        self._badge_estado_app.pack(side="right", padx=20)
+        self._badge_estado_app.pack(side="right", padx=(0, 20))
         self._punto_estado_app = tk.Canvas(
             self._badge_estado_app,
             width=8,
@@ -422,6 +602,12 @@ class AplicacionTk(tk.Tk):
         self._punto_estado_app.configure(bg=fondo)
         self._punto_estado_app.itemconfigure(self._punto_estado_app_item, fill=color)
         self._lbl_estado_app.configure(bg=fondo, fg=color)
+
+    def _abrir_configuracion(self) -> None:
+        VentanaConfiguracion(self).wait_window()
+
+    def _abrir_guia_uso(self) -> None:
+        VentanaGuiaUso(self).wait_window()
 
     def _crear_pestanas(self) -> None:
         contenedor = ttk.Frame(self, padding=(12, 8, 12, 12))
@@ -799,6 +985,10 @@ class AplicacionTk(tk.Tk):
             f"Archivo: {cfg.ruta_visible(Path(estadisticas.archivo_salida))}\n"
             f"Registros: {estadisticas.registros_totales}\n"
             f"Pendientes de área: {estadisticas.registros_pendientes}",
+        )
+        messagebox.showwarning(
+            "Advertencia",
+            "No generar los reportes definitivos antes de incorporar las correcciones manuales al maestro.",
         )
 
     def _abrir_procesado(self) -> None:
@@ -1537,6 +1727,15 @@ class AplicacionTk(tk.Tk):
             text="Indicadores y reportes de TI",
             style="Seccion.TLabel",
         ).pack(anchor="w")
+        ttk.Label(
+            self._tab_reportes,
+            text="No modificar el Excel maestro ni el archivo procesado al generar reportes.",
+            foreground=COLOR_ALERTA,
+            background=COLOR_FONDO,
+            wraplength=1100,
+            justify="left",
+            anchor="w",
+        ).pack(anchor="w", pady=(8, 4))
         fila = ttk.Frame(self._tab_reportes)
         fila.pack(fill="x", pady=(8, 6))
         ttk.Label(fila, text="Origen de datos:").pack(side="left")
@@ -1548,12 +1747,33 @@ class AplicacionTk(tk.Tk):
             state="readonly",
             width=28,
         ).pack(side="left", padx=(6, 10))
+
+        ttk.Label(fila, text="Año:").pack(side="left", padx=(10, 4))
+        self._var_anio_reporte = tk.StringVar(value=str(pd.Timestamp.now().year))
+        ttk.Combobox(
+            fila,
+            textvariable=self._var_anio_reporte,
+            values=[str(anio) for anio in sorted({pd.Timestamp.now().year, 2026, 2025, 2024})],
+            state="readonly",
+            width=8,
+        ).pack(side="left")
+
+        ttk.Label(fila, text="Mes:").pack(side="left", padx=(10, 4))
+        self._var_mes_reporte = tk.StringVar(value="Todos")
+        ttk.Combobox(
+            fila,
+            textvariable=self._var_mes_reporte,
+            values=["Todos", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"],
+            state="readonly",
+            width=10,
+        ).pack(side="left")
+
         ttk.Button(
             fila,
             text="Generar reporte",
             style="Principal.TButton",
             command=self._generar_reporte,
-        ).pack(side="left")
+        ).pack(side="left", padx=(10, 0))
         ttk.Button(
             fila, text="Abrir reporte", command=self._abrir_reporte
         ).pack(side="left", padx=8)

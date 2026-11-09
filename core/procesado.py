@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -485,6 +486,130 @@ def escribir_procesado(
     return destino
 
 
+def _normalizar_texto(valor: Any) -> str:
+    if valor is None:
+        return ""
+    try:
+        if pd.isna(valor):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    texto = unicodedata.normalize("NFKD", str(valor).upper())
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    return " ".join(texto.split())
+
+
+def _categoria_actividad(valor: Any) -> str:
+    texto = _normalizar_texto(valor)
+    if texto in {"INCIDENCIA", "INCIDENTE", "INCIDENTES"}:
+        return "Incidencia"
+    if texto in {"PROYECTO", "PROYECTOS"}:
+        return "Proyecto"
+    if texto in {"SOLICITUD", "SOLICITUDES"}:
+        return "Solicitud"
+    return texto.title() if texto else ""
+
+
+def _tabla_resumen(df: pd.DataFrame) -> pd.DataFrame:
+    horas = pd.to_numeric(df[C_HORAS], errors="coerce").fillna(0.0)
+    total_horas = float(horas.sum())
+    categorias = ["Incidencia", "Proyecto", "Solicitud"]
+    filas = []
+    for categoria in categorias:
+        mask = df[C_ACTIVIDAD].map(_categoria_actividad) == categoria
+        if not mask.any():
+            continue
+        total = float(horas[mask].sum())
+        porcentaje = 0.0 if total_horas == 0 else (total / total_horas) * 100
+        filas.append({"TIPO DE ATENCION": categoria, "TIEMPO(H)": round(total, 2), "%": round(porcentaje, 2)})
+    return pd.DataFrame(filas, columns=["TIPO DE ATENCION", "TIEMPO(H)", "%"])
+
+
+def _tabla_proyectos(df: pd.DataFrame) -> pd.DataFrame:
+    validos = df[[C_PROYECTO, C_HORAS]].copy()
+    validos = validos[validos[C_PROYECTO].notna()]
+    validos[C_PROYECTO] = validos[C_PROYECTO].astype(str).str.strip()
+    validos = validos[validos[C_PROYECTO].ne("") & validos[C_PROYECTO].ne("nan")]
+    if validos.empty:
+        return pd.DataFrame(columns=["PROYECTOS", "TIEMPO(H)", "%"])
+    validos[C_HORAS] = pd.to_numeric(validos[C_HORAS], errors="coerce").fillna(0.0)
+    total = float(validos[C_HORAS].sum())
+    agrupado = validos.groupby(C_PROYECTO, sort=False)[C_HORAS].sum().reset_index()
+    agrupado.columns = ["PROYECTOS", "TIEMPO(H)"]
+    agrupado["%"] = agrupado["TIEMPO(H)"].apply(
+        lambda valor: 0.0 if total == 0 else (valor / total) * 100
+    )
+    agrupado["TIEMPO(H)"] = agrupado["TIEMPO(H)"].round(2)
+    agrupado["%"] = agrupado["%"].round(2)
+    return agrupado.loc[:, ["PROYECTOS", "TIEMPO(H)", "%"]]
+
+
+def _tabla_actividad(df: pd.DataFrame) -> pd.DataFrame:
+    filtrado = df[[C_ACTIVIDAD, C_REQUERIMIENTO]].copy()
+    filtrado = filtrado[filtrado[C_ACTIVIDAD].map(_categoria_actividad).isin({"Incidencia", "Solicitud"})]
+    filtrado = filtrado[filtrado[C_REQUERIMIENTO].fillna("").astype(str).str.strip().ne("")]
+    if filtrado.empty:
+        return pd.DataFrame(columns=["TIPO DE ACTIVIDAD", "TICKETS", "%"])
+    agrupado = filtrado.groupby(C_REQUERIMIENTO, sort=False).size().reset_index(name="TICKETS")
+    total = int(agrupado["TICKETS"].sum())
+    agrupado["%"] = agrupado["TICKETS"].apply(
+        lambda cantidad: 0.0 if total == 0 else (cantidad / total) * 100
+    )
+    agrupado = agrupado.rename(columns={C_REQUERIMIENTO: "TIPO DE ACTIVIDAD"})
+    agrupado["TICKETS"] = agrupado["TICKETS"].astype(int)
+    agrupado["%"] = agrupado["%"].round(2)
+    agrupado = agrupado.sort_values(["TICKETS", "TIPO DE ACTIVIDAD"], ascending=[False, True])
+    return agrupado.loc[:, ["TIPO DE ACTIVIDAD", "TICKETS", "%"]].reset_index(drop=True)
+
+
+def _tabla_area(df: pd.DataFrame) -> pd.DataFrame:
+    areas = df[[C_AREA]].copy()
+    areas = areas[areas[C_AREA].fillna("").astype(str).str.strip().ne("")]
+    if areas.empty:
+        return pd.DataFrame(columns=["ÁREAS", "TICKETS", "%"])
+    agrupado = areas.groupby(C_AREA, sort=False).size().reset_index(name="TICKETS")
+    total = int(agrupado["TICKETS"].sum())
+    agrupado["%"] = agrupado["TICKETS"].apply(
+        lambda cantidad: 0.0 if total == 0 else (cantidad / total) * 100
+    )
+    agrupado = agrupado.rename(columns={C_AREA: "ÁREAS"})
+    agrupado["TICKETS"] = agrupado["TICKETS"].astype(int)
+    agrupado["%"] = agrupado["%"].round(2)
+    agrupado = agrupado.sort_values(["TICKETS", "ÁREAS"], ascending=[False, True])
+    return agrupado.loc[:, ["ÁREAS", "TICKETS", "%"]].reset_index(drop=True)
+
+
+def _tabla_detalle(df: pd.DataFrame) -> pd.DataFrame:
+    detalle = df[[C_ACTIVIDAD, C_DETALLE, C_FECHA, C_SOLICITANTE, C_AREA, C_HORAS]].copy()
+    detalle = detalle.rename(
+        columns={
+            C_ACTIVIDAD: "TIPO DE ATENCION",
+            C_DETALLE: "DETALLE",
+            C_FECHA: "FECHA",
+            C_SOLICITANTE: "USUARIO",
+            C_AREA: "AREA_USUARIO",
+            C_HORAS: "HORAS",
+        }
+    )
+    return detalle.loc[:, ["TIPO DE ATENCION", "DETALLE", "FECHA", "USUARIO", "AREA_USUARIO", "HORAS"]]
+
+
+def _agregar_grafico_pastel(hoja: Worksheet, tabla: pd.DataFrame) -> None:
+    if tabla is None or tabla.empty:
+        return
+    grafico = PieChart()
+    grafico.style = 10
+    grafico.title = None
+    grafico.height = 7
+    grafico.width = 11
+
+    datos = Reference(hoja, min_col=2, min_row=1, max_row=len(tabla) + 1)
+    categorias = Reference(hoja, min_col=1, min_row=2, max_row=len(tabla) + 1)
+    grafico.add_data(datos, titles_from_data=True)
+    grafico.set_categories(categorias)
+    hoja.add_chart(grafico, "E2")
+
+
 def escribir_reporte_excel(
     df: pd.DataFrame,
     destino: Path,
@@ -493,84 +618,40 @@ def escribir_reporte_excel(
     recurrencia: pd.DataFrame | None = None,
     titulo: str = "REPORTE DE TICKETS TI",
 ) -> Path:
-    """Genera un reporte Excel con indicadores, distribuciones y gráficos."""
+    """Genera un libro Excel con exactamente cinco hojas según la especificación."""
 
     destino = Path(destino)
     destino.parent.mkdir(parents=True, exist_ok=True)
 
     libro = Workbook()
-    hoja = libro.active
-    hoja.title = "Resumen"
+    hojas = [
+        ("RESUMEN", _tabla_resumen(df)),
+        ("PROYECTOS", _tabla_proyectos(df)),
+        ("ACTIVIDAD", _tabla_actividad(df)),
+        ("AREA", _tabla_area(df)),
+        ("DETALLE", _tabla_detalle(df)),
+    ]
 
-    hoja["A1"] = titulo
-    hoja["A1"].font = Font(name="Segoe UI", size=15, bold=True, color=_AZUL)
-    hoja.merge_cells("A1:C1")
-    hoja["A2"] = "Generado por el Sistema Integral de Tickets TI - INKACROPS"
-    hoja["A2"].font = Font(name="Segoe UI", size=9, italic=True, color="7F7F7F")
-
-    fila = 4
-    hoja.cell(row=fila, column=1, value="Indicador").font = Font(
-        name="Segoe UI", size=10, bold=True, color="FFFFFF"
-    )
-    hoja.cell(row=fila, column=1).fill = PatternFill("solid", fgColor=_AZUL)
-    hoja.cell(row=fila, column=2, value="Valor").font = Font(
-        name="Segoe UI", size=10, bold=True, color="FFFFFF"
-    )
-    hoja.cell(row=fila, column=2).fill = PatternFill("solid", fgColor=_AZUL)
-    fila += 1
-    for clave, valor in resumen.items():
-        hoja.cell(row=fila, column=1, value=clave).font = Font(name="Segoe UI", size=10)
-        hoja.cell(row=fila, column=2, value=valor).font = Font(name="Segoe UI", size=10)
-        fila += 1
-
-    hoja.column_dimensions["A"].width = 42
-    hoja.column_dimensions["B"].width = 24
-
-    indice_hoja = 2
-    for nombre, tabla in distribuciones.items():
-        if tabla is None or tabla.empty:
-            continue
-        titulo_hoja = str(nombre)[:31]
-        ws = libro.create_sheet(titulo_hoja)
+    for indice, (nombre_hoja, tabla) in enumerate(hojas):
+        ws = libro.active if indice == 0 else libro.create_sheet()
+        ws.title = nombre_hoja
         filas = [tuple(fila) for fila in tabla.itertuples(index=False, name=None)]
         _escribir_tabla(ws, 1, [str(c) for c in tabla.columns], filas)
-        ws.column_dimensions["A"].width = 40
-        ws.column_dimensions["B"].width = 14
-        if len(tabla.columns) >= 2:
+
+        if nombre_hoja == "DETALLE":
+            ws.column_dimensions["A"].width = 24
+            ws.column_dimensions["B"].width = 38
             ws.column_dimensions["C"].width = 14
+            ws.column_dimensions["D"].width = 26
+            ws.column_dimensions["E"].width = 22
+            ws.column_dimensions["F"].width = 12
+            continue
 
-        if len(tabla.columns) >= 2 and len(tabla) > 0:
-            grafico = BarChart()
-            grafico.type = "bar"
-            grafico.style = 10
-            grafico.title = str(nombre)
-            datos = Reference(
-                ws,
-                min_col=2,
-                min_row=1,
-                max_row=len(tabla) + 1,
-            )
-            categorias = Reference(
-                ws,
-                min_col=1,
-                min_row=2,
-                max_row=len(tabla) + 1,
-            )
-            grafico.add_data(datos, titles_from_data=True)
-            grafico.set_categories(categorias)
-            grafico.height = 9
-            grafico.width = 19
-            ws.add_chart(grafico, f"E{2}")
-
-        indice_hoja += 1
-
-    if recurrencia is not None and not recurrencia.empty:
-        ws = libro.create_sheet("Recurrencia")
-        filas = [tuple(fila) for fila in recurrencia.itertuples(index=False, name=None)]
-        _escribir_tabla(ws, 1, [str(c) for c in recurrencia.columns], filas)
-        ws.column_dimensions["A"].width = 70
-        ws.column_dimensions["B"].width = 12
-        ws.column_dimensions["C"].width = 14
+        ws.column_dimensions["A"].width = 28
+        ws.column_dimensions["B"].width = 14
+        ws.column_dimensions["C"].width = 12
+        if len(tabla) > 0:
+            _agregar_grafico_pastel(ws, tabla)
 
     libro.save(destino)
     libro.close()

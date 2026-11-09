@@ -878,7 +878,62 @@ class PruebasReportes(BaseTemporal):
         self.assertEqual(atencion["Proyectos"], 28)
 
     def test_reporte_excel_y_markdown(self) -> None:
-        df = self._datos_septiembre()
+        df = pd.DataFrame(
+            [
+                {
+                    C_DETALLE: "ERROR IMPRESORA",
+                    C_FECHA: date(2026, 9, 1),
+                    C_SOLICITANTE: "ANA TORRES",
+                    C_AREA: "SISTEMAS",
+                    C_ATENCION: "Mesa de Ayuda",
+                    C_REQUERIMIENTO: "Soporte",
+                    C_RESPONSABLE: "CIRO",
+                    C_SUBTIPO: "Hardware",
+                    C_PROYECTO: "PLANTA",
+                    C_HORAS: 2.0,
+                    C_ACTIVIDAD: "Incidencia",
+                },
+                {
+                    C_DETALLE: "DESARROLLO PORTAL",
+                    C_FECHA: date(2026, 9, 2),
+                    C_SOLICITANTE: "LUIS PEREZ",
+                    C_AREA: "CONTABILIDAD",
+                    C_ATENCION: "Gestion",
+                    C_REQUERIMIENTO: "Portal",
+                    C_RESPONSABLE: "PAUL",
+                    C_SUBTIPO: "Aplicacion",
+                    C_PROYECTO: "PORTAL",
+                    C_HORAS: 3.0,
+                    C_ACTIVIDAD: "Solicitud",
+                },
+                {
+                    C_DETALLE: "AVANCE PROYECTO CRM",
+                    C_FECHA: date(2026, 9, 3),
+                    C_SOLICITANTE: "PEDRO SOTO",
+                    C_AREA: "SISTEMAS",
+                    C_ATENCION: "Proyectos",
+                    C_REQUERIMIENTO: "CRM",
+                    C_RESPONSABLE: "MARIO",
+                    C_SUBTIPO: "Software",
+                    C_PROYECTO: "CRM",
+                    C_HORAS: 5.0,
+                    C_ACTIVIDAD: "Proyecto",
+                },
+                {
+                    C_DETALLE: "CONSULTA RENDIMIENTO",
+                    C_FECHA: date(2026, 9, 4),
+                    C_SOLICITANTE: "MARIA LOPEZ",
+                    C_AREA: "TI",
+                    C_ATENCION: "Mesa de Ayuda",
+                    C_REQUERIMIENTO: "Consulta",
+                    C_RESPONSABLE: "ANA",
+                    C_SUBTIPO: "Soporte",
+                    C_PROYECTO: None,
+                    C_HORAS: 1.5,
+                    C_ACTIVIDAD: "Incidencia",
+                },
+            ]
+        )
         salida = self.raiz / "reportes" / "reporte.xlsx"
         resultado = generar_reporte(df, ruta_salida=salida)
         self.assertTrue(Path(resultado["xlsx"]).is_file())
@@ -886,10 +941,29 @@ class PruebasReportes(BaseTemporal):
         self.assertTrue(
             Path(resultado["markdown"]).read_text(encoding="utf-8").startswith("#")
         )
-        libro = load_workbook(resultado["xlsx"], read_only=True)
+        libro = load_workbook(resultado["xlsx"])
         try:
-            self.assertIn("Resumen", libro.sheetnames)
-            self.assertIn("Por atencion", libro.sheetnames)
+            self.assertEqual(
+                libro.sheetnames,
+                ["RESUMEN", "PROYECTOS", "ACTIVIDAD", "AREA", "DETALLE"],
+            )
+            self.assertEqual(
+                next(libro["RESUMEN"].iter_rows(min_row=1, max_row=1, values_only=True)),
+                ("TIPO DE ATENCION", "TIEMPO(H)", "%"),
+            )
+            self.assertEqual(
+                [fila[0] for fila in libro["RESUMEN"].iter_rows(min_row=2, max_row=4, values_only=True)],
+                ["Incidencia", "Proyecto", "Solicitud"],
+            )
+            self.assertEqual(
+                next(libro["DETALLE"].iter_rows(min_row=1, max_row=1, values_only=True)),
+                ("TIPO DE ATENCION", "DETALLE", "FECHA", "USUARIO", "AREA_USUARIO", "HORAS"),
+            )
+            self.assertEqual(libro["DETALLE"].max_column, 6)
+            self.assertEqual(len(libro["DETALLE"]._charts), 0)
+            for nombre in ("RESUMEN", "PROYECTOS", "ACTIVIDAD", "AREA"):
+                self.assertEqual(len(libro[nombre]._charts), 1)
+                self.assertIsNone(libro[nombre]._charts[0].title)
         finally:
             libro.close()
 
