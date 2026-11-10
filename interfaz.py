@@ -27,9 +27,20 @@ from tkinter import filedialog, messagebox, ttk
 
 from config import configuracion as cfg
 from config.logging_config import configurar_logging
+from config.sqlserver import (
+    DRIVERS_CONOCIDOS,
+    EMPRESAS,
+    ErrorConfiguracionSQL,
+    cargar_configuracion,
+    guardar_configuracion,
+    registrar_prueba,
+    validar_configuracion,
+)
 from core import asignaciones as svc_asignaciones
 from core import auditoria
 from core import estado as svc_estado
+from core import procedencia
+from core import revision as svc_revision
 from core import solicitantes as svc_solicitantes
 from core.archivos import ErrorArchivo, ErrorEstructura, leer_excel
 from core.bloqueo import ErrorBloqueo, esta_bloqueado, bloqueo
@@ -51,21 +62,37 @@ from core.reimportacion import (
     aplicar_reimportacion,
 )
 from core.reportes import generar_reporte
+from database.connection import controlador_disponible, probar_conexion
+from database.synchronizer import (
+    Sincronizador,
+    cargar_empleados,
+    resumen_sincronizacion,
+)
 from panel_principal import PanelPrincipal, SEMANTICA
+import ui_tema
+from ui_tema import (
+    AZUL_MARINO,
+    AZUL_OSCURO as COLOR_CABECERA,
+    AZUL_PRINCIPAL as COLOR_ACENTO,
+    AZUL_SUAVE,
+    BLANCO,
+    BORDE as COLOR_BORDE,
+    BotonNavegacion,
+    EncabezadoDegradado,
+    FONDO as COLOR_FONDO,
+    NARANJA as COLOR_ALERTA,
+    Pill,
+    ROJO as COLOR_ERROR,
+    SUPERFICIE,
+    TEXTO as COLOR_TEXTO,
+    TEXTO_SECUNDARIO as COLOR_TEXTO_SECUNDARIO,
+    VERDE as COLOR_OK,
+)
 
 LOGGER = logging.getLogger("automatizador")
 
 TITULO = "Sistema Integral de Tickets TI - INKACROPS"
-COLOR_FONDO = "#f8fafc"
-COLOR_CABECERA = "#ffffff"
-COLOR_ACENTO = "#2563eb"
-COLOR_TEXTO = "#0f172a"
-COLOR_TEXTO_SECUNDARIO = "#64748b"
-COLOR_BORDE = "#e2e8f0"
-COLOR_TABLA_CABECERA = "#f1f5f9"
-COLOR_OK = "#15803d"
-COLOR_ALERTA = "#b45309"
-COLOR_ERROR = "#b91c1c"
+COLOR_TABLA_CABECERA = "#E8EEF8"
 
 _ETIQUETAS_TIPO = {
     TIPO_NUEVO: "Nuevo",
@@ -90,7 +117,7 @@ def _texto(valor: Any) -> str:
 
 
 class VentanaConfiguracion(tk.Toplevel):
-    """Ventana ligera para ajustar rutas locales sin tocar el código fuente."""
+    """Configuración de rutas locales y de la conexión corporativa SQL Server."""
 
     _RUTAS = [
         ("Archivos de entrada", "input_dir", "directorio"),
@@ -103,46 +130,94 @@ class VentanaConfiguracion(tk.Toplevel):
         ("Logs", "logs_dir", "directorio"),
     ]
 
-    def __init__(self, padre: tk.Misc) -> None:
+    def __init__(self, padre: tk.Misc, seccion: str = "rutas") -> None:
         super().__init__(padre)
         self.title("Configuración")
-        self.geometry("760x500")
-        self.minsize(620, 420)
+        self.geometry("900x680")
+        self.minsize(760, 560)
         self.configure(bg=COLOR_FONDO)
         self.transient(padre)
         self.grab_set()
 
         self._config = cfg.cargar_configuracion_local()
         self._variables: dict[str, tk.StringVar] = {}
+        self._sql = cargar_configuracion()
+        self._sql_vars: dict[str, tk.StringVar] = {}
+        self._sql_bools: dict[str, tk.BooleanVar] = {}
+        self._entries_sql: dict[str, ttk.Entry] = {}
+        self._sql_ocupado = False
+        self._pestanas: ttk.Notebook | None = None
 
-        cabecera = ttk.Label(
-            self,
+        cabecera = tk.Frame(self, bg=AZUL_MARINO)
+        cabecera.pack(fill="x")
+        tk.Label(
+            cabecera,
             text="Configuración del sistema",
-            style="Seccion.TLabel",
-        )
-        cabecera.pack(anchor="w", padx=18, pady=(14, 8))
+            bg=AZUL_MARINO,
+            fg=BLANCO,
+            font=(ui_tema.FUENTE, 15, "bold"),
+            padx=18,
+            pady=12,
+            anchor="w",
+        ).pack(side="left")
 
-        marco = ttk.Frame(self, padding=10)
-        marco.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        self._pestanas = ttk.Notebook(self)
+        self._pestanas.pack(fill="both", expand=True, padx=14, pady=12)
+        self._tab_rutas = ttk.Frame(self._pestanas, padding=14)
+        self._tab_sql = ttk.Frame(self._pestanas, padding=10)
+        self._pestanas.add(self._tab_rutas, text="Rutas y carpetas")
+        self._pestanas.add(self._tab_sql, text="Conexión SQL Server")
+
+        self._construir_rutas()
+        self._construir_sql()
+        self._cargar_formulario_sql()
+
+        acciones = ttk.Frame(self)
+        acciones.pack(fill="x", padx=14, pady=(0, 12))
+        ttk.Button(
+            acciones, text="Cerrar", command=self.destroy
+        ).pack(side="right")
+        ttk.Button(
+            acciones,
+            text="Guardar configuración",
+            style="Principal.TButton",
+            command=self._guardar,
+        ).pack(side="right", padx=(0, 8))
+
+        if str(seccion).lower() == "sql":
+            self._pestanas.select(self._tab_sql)
+
+    # ------------------------------------------------------------------
+    # Pestaña de rutas
+    # ------------------------------------------------------------------
+    def _construir_rutas(self) -> None:
+        marco = ttk.Frame(self._tab_rutas)
+        marco.pack(fill="both", expand=True)
 
         for titulo, nombre, tipo in self._RUTAS:
             fila = ttk.Frame(marco)
             fila.pack(fill="x", pady=4)
-            ttk.Label(fila, text=titulo, width=22, anchor="w").pack(side="left")
+            ttk.Label(fila, text=titulo, width=24, anchor="w").pack(side="left")
             variable = tk.StringVar(value=str(self._config.get(nombre, "")))
             self._variables[nombre] = variable
-            ttk.Entry(fila, textvariable=variable).pack(side="left", fill="x", expand=True, padx=(8, 8))
+            ttk.Entry(fila, textvariable=variable).pack(
+                side="left", fill="x", expand=True, padx=(8, 8)
+            )
             ttk.Button(
                 fila,
                 text="Examinar…",
                 command=lambda n=nombre, t=tipo: self._seleccionar_ruta(n, t),
             ).pack(side="left")
 
-        acciones = ttk.Frame(self)
-        acciones.pack(fill="x", padx=12, pady=(0, 12))
-        ttk.Button(acciones, text="Guardar", style="Principal.TButton", command=self._guardar).pack(side="right")
-        ttk.Button(acciones, text="Restaurar", command=self._restaurar).pack(side="right", padx=(0, 8))
-        ttk.Button(acciones, text="Cancelar", command=self.destroy).pack(side="right", padx=(0, 8))
+        ttk.Label(
+            marco,
+            text=(
+                "Las rutas relativas se resuelven desde la carpeta del proyecto. "
+                "Los archivos originales nunca se modifican."
+            ),
+            style="Subtitulo.TLabel",
+            wraplength=780,
+        ).pack(anchor="w", pady=(12, 0))
 
     def _seleccionar_ruta(self, nombre: str, tipo: str) -> None:
         valor = self._variables[nombre].get().strip()
@@ -150,36 +225,547 @@ class VentanaConfiguracion(tk.Toplevel):
         if tipo == "archivo":
             ruta = filedialog.askopenfilename(
                 title="Seleccione el archivo",
-                initialdir=str(Path(directorio_base).resolve() if Path(directorio_base).exists() else cfg.BASE_DIR),
+                initialdir=str(
+                    Path(directorio_base).resolve()
+                    if Path(directorio_base).exists()
+                    else cfg.BASE_DIR
+                ),
             )
         else:
             ruta = filedialog.askdirectory(
                 title="Seleccione la carpeta",
-                initialdir=str(Path(directorio_base).resolve() if Path(directorio_base).exists() else cfg.BASE_DIR),
+                initialdir=str(
+                    Path(directorio_base).resolve()
+                    if Path(directorio_base).exists()
+                    else cfg.BASE_DIR
+                ),
             )
         if ruta:
             self._variables[nombre].set(ruta)
 
+    # ------------------------------------------------------------------
+    # Pestaña SQL Server
+    # ------------------------------------------------------------------
+    def _campo(
+        self,
+        padre: tk.Misc,
+        etiqueta: str,
+        nombre: str,
+        *,
+        ancho: int = 34,
+        mostrar: str = "",
+    ) -> ttk.Entry:
+        fila = ttk.Frame(padre)
+        fila.pack(fill="x", pady=3)
+        ttk.Label(fila, text=etiqueta, width=26, anchor="w").pack(side="left")
+        variable = tk.StringVar()
+        self._sql_vars[nombre] = variable
+        entrada = ttk.Entry(
+            fila, textvariable=variable, width=ancho, show=mostrar
+        )
+        entrada.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        self._entries_sql[nombre] = entrada
+        return entrada
+
+    def _construir_sql(self) -> None:
+        contenedor = ttk.Frame(self._tab_sql)
+        contenedor.pack(fill="both", expand=True)
+
+        lienzo = tk.Canvas(
+            contenedor, bg=COLOR_FONDO, highlightthickness=0, bd=0
+        )
+        barra = ttk.Scrollbar(contenedor, orient="vertical", command=lienzo.yview)
+        marco = ttk.Frame(lienzo)
+        lienzo.create_window((0, 0), window=marco, anchor="nw")
+        lienzo.configure(yscrollcommand=barra.set)
+        lienzo.pack(side="left", fill="both", expand=True)
+        barra.pack(side="right", fill="y")
+        marco.bind(
+            "<Configure>",
+            lambda _e: lienzo.configure(scrollregion=lienzo.bbox("all")),
+        )
+
+        ttk.Label(
+            marco,
+            text="Conexión a base de datos corporativa",
+            style="Seccion.TLabel",
+        ).pack(anchor="w", pady=(0, 4))
+        ttk.Label(
+            marco,
+            text=(
+                "La contraseña se cifra con la cuenta de Windows (DPAPI). "
+                "La conexión es de solo lectura: el sistema nunca ejecuta "
+                "INSERT, UPDATE ni DELETE sobre EXACTUS."
+            ),
+            style="Subtitulo.TLabel",
+            wraplength=760,
+        ).pack(anchor="w", pady=(0, 8))
+
+        self._campo(marco, "Servidor / IP", "servidor")
+        self._campo(marco, "Puerto", "puerto", ancho=12)
+        self._campo(marco, "Base de datos", "base_datos")
+
+        fila_auth = ttk.Frame(marco)
+        fila_auth.pack(fill="x", pady=3)
+        ttk.Label(
+            fila_auth, text="Tipo de autenticación", width=26, anchor="w"
+        ).pack(side="left")
+        self._sql_vars["autenticacion"] = tk.StringVar()
+        self._combo_auth = ttk.Combobox(
+            fila_auth,
+            textvariable=self._sql_vars["autenticacion"],
+            values=("Windows (cuenta actual)", "SQL Server (usuario y contraseña)"),
+            state="readonly",
+        )
+        self._combo_auth.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        self._combo_auth.bind(
+            "<<ComboboxSelected>>", lambda _e: self._actualizar_auth()
+        )
+
+        self._campo(marco, "Usuario SQL", "usuario")
+        self._campo(marco, "Contraseña", "contrasena", mostrar="•")
+
+        fila_driver = ttk.Frame(marco)
+        fila_driver.pack(fill="x", pady=3)
+        ttk.Label(
+            fila_driver, text="Controlador ODBC", width=26, anchor="w"
+        ).pack(side="left")
+        self._sql_vars["driver"] = tk.StringVar()
+        self._combo_driver = ttk.Combobox(
+            fila_driver,
+            textvariable=self._sql_vars["driver"],
+            values=DRIVERS_CONOCIDOS,
+        )
+        self._combo_driver.pack(
+            side="left", fill="x", expand=True, padx=(8, 0)
+        )
+
+        self._campo(marco, "Timeout (segundos)", "timeout", ancho=10)
+        self._campo(marco, "Tamaño de lote", "lote", ancho=10)
+
+        fila_flags = ttk.Frame(marco)
+        fila_flags.pack(fill="x", pady=(6, 2))
+        for nombre, etiqueta in (
+            ("encriptar", "Cifrar conexión"),
+            ("confiar_certificado", "Confiar en el certificado"),
+            ("auto_sync", "Resolver automáticamente al procesar"),
+        ):
+            variable = tk.BooleanVar(value=True)
+            self._sql_bools[nombre] = variable
+            ttk.Checkbutton(fila_flags, text=etiqueta, variable=variable).pack(
+                side="left", padx=(0, 16)
+            )
+
+        ttk.Label(
+            marco, text="Empresas autorizadas (18)", style="Seccion.TLabel"
+        ).pack(anchor="w", pady=(10, 2))
+        caja = ttk.Frame(marco)
+        caja.pack(fill="x", pady=(0, 4))
+        self._lista_empresas = tk.Listbox(
+            caja,
+            selectmode="multiple",
+            height=6,
+            exportselection=False,
+            font=(ui_tema.FUENTE, 9),
+            bg=SUPERFICIE,
+            fg=COLOR_TEXTO,
+            selectbackground=COLOR_ACENTO,
+            selectforeground=BLANCO,
+            highlightthickness=1,
+            highlightbackground=COLOR_BORDE,
+            bd=0,
+        )
+        self._lista_empresas.pack(side="left", fill="x", expand=True)
+        barra_empresas = ttk.Scrollbar(
+            caja, orient="vertical", command=self._lista_empresas.yview
+        )
+        barra_empresas.pack(side="right", fill="y")
+        self._lista_empresas.configure(yscrollcommand=barra_empresas.set)
+        for empresa in EMPRESAS:
+            self._lista_empresas.insert("end", empresa)
+
+        acciones = ttk.Frame(marco)
+        acciones.pack(fill="x", pady=4)
+        ttk.Button(
+            acciones, text="Seleccionar todas", command=self._seleccionar_todas
+        ).pack(side="left")
+        ttk.Button(
+            acciones, text="Quitar selección", command=self._quitar_seleccion
+        ).pack(side="left", padx=6)
+
+        estado = ttk.LabelFrame(marco, text="Estado de la conexión", padding=8)
+        estado.pack(fill="x", pady=(10, 6))
+        self._pill_sql = Pill(estado, "Desconectado", estilo="neutral", punto=True)
+        self._pill_sql.pack(anchor="w", pady=(0, 6))
+        self._var_estado_sql = tk.StringVar(value="Sin prueba de conexión.")
+        ttk.Label(
+            estado, textvariable=self._var_estado_sql, wraplength=740
+        ).pack(anchor="w")
+        self._var_ultima_prueba = tk.StringVar(value="")
+        ttk.Label(
+            estado,
+            textvariable=self._var_ultima_prueba,
+            style="Subtitulo.TLabel",
+        ).pack(anchor="w", pady=(4, 0))
+
+        info = ttk.LabelFrame(marco, text="Información de la caché local", padding=8)
+        info.pack(fill="x", pady=(0, 6))
+        self._var_info_sync = tk.StringVar(value="")
+        ttk.Label(
+            info, textvariable=self._var_info_sync, justify="left", wraplength=740
+        ).pack(anchor="w")
+
+        botones = ttk.Frame(marco)
+        botones.pack(fill="x", pady=(8, 4))
+        self._btn_probar = ttk.Button(
+            botones, text="Probar conexión", command=self._probar_conexion
+        )
+        self._btn_probar.pack(side="left")
+        self._btn_guardar_sql = ttk.Button(
+            botones,
+            text="Guardar conexión",
+            style="Principal.TButton",
+            command=self._guardar_sql,
+        )
+        self._btn_guardar_sql.pack(side="left", padx=6)
+        self._btn_desconectar = ttk.Button(
+            botones, text="Desconectar", command=self._desconectar
+        )
+        self._btn_desconectar.pack(side="left", padx=6)
+        self._btn_sincronizar = ttk.Button(
+            botones,
+            text="Sincronizar ahora",
+            style="Verde.TButton",
+            command=self._sincronizar_ahora,
+        )
+        self._btn_sincronizar.pack(side="left", padx=6)
+
+        if not controlador_disponible():
+            ttk.Label(
+                marco,
+                text=(
+                    "Aviso: el módulo pyodbc no está instalado. La aplicación "
+                    "seguirá funcionando con la caché local; instale "
+                    "requirements.txt para conectar con SQL Server."
+                ),
+                foreground=COLOR_ALERTA,
+                wraplength=740,
+            ).pack(anchor="w", pady=(6, 0))
+
+    def _actualizar_auth(self) -> None:
+        es_sql = self._sql_vars["autenticacion"].get().startswith("SQL")
+        estado = "normal" if es_sql else "disabled"
+        for nombre in ("usuario", "contrasena"):
+            entrada = self._entries_sql.get(nombre)
+            if entrada is not None:
+                entrada.configure(state=estado)
+
+    def _seleccionar_todas(self) -> None:
+        self._lista_empresas.selection_set(0, "end")
+
+    def _quitar_seleccion(self) -> None:
+        self._lista_empresas.selection_clear(0, "end")
+
+    def _cargar_formulario_sql(self) -> None:
+        config = self._sql
+        valores = {
+            "servidor": config.servidor,
+            "puerto": str(config.puerto),
+            "base_datos": config.base_datos,
+            "usuario": config.usuario,
+            "contrasena": config.contrasena,
+            "driver": config.driver,
+            "timeout": str(config.timeout),
+            "lote": str(config.lote),
+        }
+        for nombre, valor in valores.items():
+            self._sql_vars[nombre].set(valor)
+        self._sql_vars["autenticacion"].set(
+            "SQL Server (usuario y contraseña)"
+            if config.usa_sql_auth
+            else "Windows (cuenta actual)"
+        )
+        self._sql_bools["encriptar"].set(bool(config.encriptar))
+        self._sql_bools["confiar_certificado"].set(bool(config.confiar_certificado))
+        self._sql_bools["auto_sync"].set(bool(config.auto_sync))
+        seleccionadas = set(config.empresas_activas())
+        for indice, empresa in enumerate(EMPRESAS):
+            if empresa in seleccionadas:
+                self._lista_empresas.selection_set(indice)
+        self._actualizar_estado_visual(config.ultimo_estado, config.ultimo_error)
+        self._var_ultima_prueba.set(
+            f"Última prueba: {config.ultima_prueba}"
+            if config.ultima_prueba
+            else "Sin prueba de conexión registrada."
+        )
+        self._actualizar_info_cache()
+
+    def _actualizar_estado_visual(self, estado: str, mensaje: str = "") -> None:
+        estado = str(estado or "desconectado").lower()
+        if estado == "conectado":
+            self._pill_sql.actualizar("Conectado", "success")
+        elif estado == "error":
+            texto = "Error de conexión"
+            if "autentic" in mensaje.lower():
+                texto = "Error de autenticación"
+            elif "tiempo" in mensaje.lower() or "timeout" in mensaje.lower():
+                texto = "Tiempo de espera agotado"
+            elif "servidor" in mensaje.lower():
+                texto = "Servidor no disponible"
+            self._pill_sql.actualizar(texto, "danger")
+        else:
+            self._pill_sql.actualizar("Desconectado", "neutral")
+        self._var_estado_sql.set(mensaje or "Sin prueba de conexión.")
+
+    def _actualizar_info_cache(self) -> None:
+        resumen = resumen_sincronizacion()
+        self._var_info_sync.set(
+            f"Empresas configuradas: {len(EMPRESAS)}\n"
+            f"Última sincronización: {resumen.get('fecha') or 'nunca'}\n"
+            f"Empleados almacenados localmente: {resumen.get('total_empleados', 0)}\n"
+            f"Errores de sincronización: {resumen.get('errores', 0)}"
+        )
+
+    def _colectar_sql(self):
+        from config.sqlserver import ConfiguracionSQL
+
+        try:
+            puerto = int(self._sql_vars["puerto"].get().strip() or 1433)
+            timeout = int(self._sql_vars["timeout"].get().strip() or 10)
+            lote = int(self._sql_vars["lote"].get().strip() or 200)
+        except ValueError as exc:
+            raise ErrorConfiguracionSQL(
+                "Puerto, timeout y lote deben ser números enteros."
+            ) from exc
+
+        seleccion = [
+            EMPRESAS[indice]
+            for indice in self._lista_empresas.curselection()
+        ]
+        config = ConfiguracionSQL(
+            habilitado=bool(self._sql_vars["servidor"].get().strip()),
+            servidor=self._sql_vars["servidor"].get().strip(),
+            puerto=puerto,
+            base_datos=self._sql_vars["base_datos"].get().strip(),
+            autenticacion=(
+                "sql"
+                if self._sql_vars["autenticacion"].get().startswith("SQL")
+                else "windows"
+            ),
+            usuario=self._sql_vars["usuario"].get().strip(),
+            contrasena=self._sql_vars["contrasena"].get(),
+            driver=self._sql_vars["driver"].get().strip(),
+            timeout=timeout,
+            encriptar=bool(self._sql_bools["encriptar"].get()),
+            confiar_certificado=bool(self._sql_bools["confiar_certificado"].get()),
+            auto_sync=bool(self._sql_bools["auto_sync"].get()),
+            lote=lote,
+            empresas=seleccion or list(EMPRESAS),
+            ultima_prueba=self._sql.ultima_prueba,
+            ultimo_estado=self._sql.ultimo_estado,
+            ultimo_error=self._sql.ultimo_error,
+            ultima_sincronizacion=self._sql.ultima_sincronizacion,
+        )
+        return validar_configuracion(config)
+
+    def _guardar_sql(self) -> None:
+        try:
+            config = self._colectar_sql()
+            guardar_configuracion(config)
+        except ErrorConfiguracionSQL as exc:
+            messagebox.showerror("Conexión SQL inválida", str(exc))
+            return
+        except OSError as exc:
+            messagebox.showerror("No se pudo guardar", str(exc))
+            return
+        self._sql = config
+        messagebox.showinfo(
+            "Conexión guardada",
+            "La configuración se guardó. Use 'Probar conexión' para verificar "
+            "el acceso real antes de sincronizar.",
+        )
+
+    def _probar_conexion(self) -> None:
+        if self._sql_ocupado:
+            return
+        try:
+            config = self._colectar_sql()
+        except ErrorConfiguracionSQL as exc:
+            messagebox.showerror("Conexión SQL inválida", str(exc))
+            return
+
+        self._sql_ocupado = True
+        self._btn_probar.configure(state="disabled")
+        self._pill_sql.actualizar("Probando…", "info")
+        self._var_estado_sql.set("Comprobando el servidor y las credenciales…")
+
+        def tarea():
+            return probar_conexion(config)
+
+        def terminar(resultado):
+            self._sql_ocupado = False
+            self._btn_probar.configure(state="normal")
+            if isinstance(resultado, Exception):
+                self._actualizar_estado_visual("error", str(resultado))
+                return
+            conectado = bool(resultado.get("ok"))
+            actualizada = registrar_prueba(
+                config,
+                conectado=conectado,
+                mensaje=str(resultado.get("mensaje") or ""),
+            )
+            try:
+                guardar_configuracion(actualizada)
+                self._sql = actualizada
+            except OSError as exc:
+                LOGGER.warning("No se pudo guardar el estado de la prueba: %s", exc)
+            self._actualizar_estado_visual(
+                "conectado" if conectado else "error",
+                str(resultado.get("mensaje") or ""),
+            )
+            self._var_ultima_prueba.set(
+                f"Última prueba: {actualizada.ultima_prueba}"
+            )
+
+        self._ejecutar_tarea(tarea, terminar)
+
+    def _desconectar(self) -> None:
+        config = self._sql.clonar(
+            habilitado=False,
+            ultimo_estado="desconectado",
+            ultimo_error="",
+        )
+        try:
+            guardar_configuracion(config)
+            self._sql = config
+        except (OSError, ErrorConfiguracionSQL) as exc:
+            messagebox.showerror("No se pudo desconectar", str(exc))
+            return
+        self._actualizar_estado_visual(
+            "desconectado",
+            "Integración deshabilitada. La caché local sigue disponible.",
+        )
+        self._var_ultima_prueba.set("La configuración guardada se conserva.")
+
+    def _sincronizar_ahora(self) -> None:
+        if self._sql_ocupado:
+            return
+        try:
+            config = self._colectar_sql()
+        except ErrorConfiguracionSQL as exc:
+            messagebox.showerror("Conexión SQL inválida", str(exc))
+            return
+        if not config.configurada:
+            messagebox.showwarning(
+                "Sin configuración",
+                "Indique servidor y base de datos antes de sincronizar.",
+            )
+            return
+        if not controlador_disponible():
+            messagebox.showerror(
+                "pyodbc no disponible",
+                "Instale pyodbc y un controlador ODBC de SQL Server para "
+                "sincronizar. La aplicación puede seguir usando la caché local.",
+            )
+            return
+
+        self._sql_ocupado = True
+        self._btn_sincronizar.configure(state="disabled")
+        self._pill_sql.actualizar("Sincronizando…", "info")
+        self._var_estado_sql.set(
+            "Consultando las empresas configuradas. Esta operación puede tardar."
+        )
+
+        def tarea():
+            return Sincronizador(config).sincronizar_completo()
+
+        def terminar(resultado):
+            self._sql_ocupado = False
+            self._btn_sincronizar.configure(state="normal")
+            if isinstance(resultado, Exception):
+                self._actualizar_estado_visual("error", str(resultado))
+                messagebox.showerror("Sincronización fallida", str(resultado))
+                return
+            actualizada = registrar_prueba(
+                config, conectado=True, mensaje="Sincronización completada."
+            ).clonar(ultima_sincronizacion=resultado.fecha)
+            try:
+                guardar_configuracion(actualizada)
+                self._sql = actualizada
+            except OSError as exc:
+                LOGGER.warning("No se pudo guardar la sincronización: %s", exc)
+            self._actualizar_estado_visual(
+                "conectado",
+                f"Sincronización completada: {resultado.total_empleados} empleados.",
+            )
+            self._actualizar_info_cache()
+            messagebox.showinfo(
+                "Sincronización completada",
+                f"Nuevos: {resultado.nuevos}\n"
+                f"Actualizados: {resultado.actualizados}\n"
+                f"Departamentos modificados: {resultado.departamentos_modificados}\n"
+                f"Empleados sin departamento: {resultado.sin_departamento}\n"
+                f"Registros ambiguos: {resultado.ambiguos}\n"
+                f"Errores: {resultado.cantidad_errores}\n"
+                f"Total almacenado: {resultado.total_empleados}\n"
+                f"Fecha: {resultado.fecha}",
+            )
+
+        self._ejecutar_tarea(tarea, terminar)
+
+    def _ejecutar_tarea(self, tarea, al_terminar) -> None:
+        def ejecutar():
+            try:
+                resultado = tarea()
+            except Exception as exc:  # noqa: BLE001 - se informa en la interfaz
+                resultado = exc
+            try:
+                self.after(0, lambda: self._finalizar_tarea(al_terminar, resultado))
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=ejecutar, daemon=True).start()
+
+    def _finalizar_tarea(self, al_terminar, resultado) -> None:
+        try:
+            if self.winfo_exists():
+                al_terminar(resultado)
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Guardado general
+    # ------------------------------------------------------------------
     def _colectar(self) -> dict[str, str | int]:
         datos: dict[str, str | int] = {}
         for nombre, variable in self._variables.items():
-            valor = variable.get().strip()
-            if nombre == "max_backups":
-                continue
-            datos[nombre] = valor
+            datos[nombre] = variable.get().strip()
         datos["max_backups"] = self._config.get("max_backups", 10)
         datos["log_level"] = self._config.get("log_level", "INFO")
-        datos["formato_fecha_reporte"] = self._config.get("formato_fecha_reporte", "DD/MM/YYYY")
+        datos["formato_fecha_reporte"] = self._config.get(
+            "formato_fecha_reporte", "DD/MM/YYYY"
+        )
         return datos
 
     def _guardar(self) -> None:
         try:
             validada = cfg.guardar_configuracion_local(self._colectar())
             cfg.aplicar_configuracion(validada)
-        except ValueError as exc:
+            if self._sql_vars:
+                config = self._colectar_sql()
+                guardar_configuracion(config)
+                self._sql = config
+        except (ValueError, ErrorConfiguracionSQL) as exc:
             messagebox.showerror("Configuración inválida", str(exc))
             return
-        messagebox.showinfo("Configuración guardada", "Los cambios se aplicarán en la próxima operación y la aplicación puede requerir reinicio si se usaron rutas nuevas.")
+        except OSError as exc:
+            messagebox.showerror("No se pudo guardar", str(exc))
+            return
+        messagebox.showinfo(
+            "Configuración guardada",
+            "Los cambios se aplicarán en la próxima operación. La aplicación "
+            "puede requerir reinicio si se usaron rutas nuevas.",
+        )
         self.destroy()
 
     def _restaurar(self) -> None:
@@ -274,8 +860,8 @@ class AplicacionTk(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(TITULO)
-        self.geometry("1240x800")
-        self.minsize(1080, 700)
+        self.geometry("1440x900")
+        self.minsize(1100, 700)
         self.configure(bg=COLOR_FONDO)
 
         self._estado = svc_estado.cargar_estado()
@@ -286,6 +872,11 @@ class AplicacionTk(tk.Tk):
         self._solicitantes_por_iid: dict[str, dict[str, Any]] = {}
         self._ultimo_procesado: str = self._estado.ultimo_archivo_procesado
         self._ultimo_manifiesto: str = self._estado.ultimo_manifiesto
+        self._ruta_entrada_actual: str = ""
+        self._hoja_entrada_actual: str | None = None
+        self._ruta_revision_actual: str = ""
+        self._revision_actual: Any = None
+        self._ventana_validacion: Any = None
         self._reimportacion = None
         self._reporte: dict[str, Any] | None = None
         self._cola: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -516,105 +1107,200 @@ class AplicacionTk(tk.Tk):
             arrowcolor=COLOR_TEXTO_SECUNDARIO,
             relief="flat",
         )
+        # La identidad corporativa compartida se aplica al final para que
+        # prevalezca sobre los estilos heredados del diseño anterior.
+        ui_tema.aplicar_estilos(self)
 
     def _crear_cabecera(self) -> None:
-        cabecera = tk.Frame(self, bg=COLOR_CABECERA, height=72)
-        cabecera.pack(side="top", fill="x")
-        cabecera.pack_propagate(False)
+        self._encabezado = EncabezadoDegradado(self, alto=70)
+        self._encabezado.pack(side="top", fill="x")
+        cabecera = self._encabezado.contenido
+        cabecera.configure(bg=AZUL_MARINO)
 
-        marca = tk.Frame(cabecera, bg=COLOR_ACENTO, width=34, height=34)
-        marca.pack(side="left", padx=(20, 12), pady=19)
-        marca.pack_propagate(False)
-        tk.Label(
-            marca,
-            text="TI",
-            bg=COLOR_ACENTO,
-            fg="#ffffff",
-            font=("Segoe UI", 11, "bold"),
-        ).pack(expand=True)
+        logo = tk.Canvas(
+            cabecera,
+            width=40,
+            height=40,
+            bg=AZUL_MARINO,
+            highlightthickness=0,
+            bd=0,
+        )
+        logo.create_oval(2, 2, 38, 38, fill="#2C6FE0", outline="#7FB2FF", width=2)
+        logo.create_text(
+            20, 20, text="IK", fill=BLANCO, font=(ui_tema.FUENTE, 12, "bold")
+        )
+        logo.pack(side="left", padx=(20, 10), pady=15)
 
-        bloque = tk.Frame(cabecera, bg=COLOR_CABECERA)
+        bloque = tk.Frame(cabecera, bg=AZUL_MARINO)
         bloque.pack(side="left", pady=12)
         tk.Label(
             bloque,
             text="INKACROPS",
-            bg=COLOR_CABECERA,
-            fg=COLOR_TEXTO,
-            font=("Segoe UI", 13, "bold"),
+            bg=AZUL_MARINO,
+            fg=BLANCO,
+            font=(ui_tema.FUENTE, 14, "bold"),
             anchor="w",
         ).pack(anchor="w")
         tk.Label(
             bloque,
-            text=TITULO,
-            bg=COLOR_CABECERA,
-            fg=COLOR_TEXTO_SECUNDARIO,
-            font=("Segoe UI", 9),
+            text="Sistema Integral de Tickets TI",
+            bg=AZUL_MARINO,
+            fg="#BFD3F5",
+            font=(ui_tema.FUENTE, 9),
             anchor="w",
         ).pack(anchor="w")
 
-        acciones = tk.Frame(cabecera, bg=COLOR_CABECERA)
-        acciones.pack(side="right", padx=(0, 20))
+        acciones = tk.Frame(cabecera, bg=AZUL_MARINO)
+        acciones.pack(side="right", padx=(0, 18))
         ttk.Button(
             acciones,
             text="Guía de uso",
+            style="Cabecera.TButton",
             command=self._abrir_guia_uso,
         ).pack(side="right", padx=(0, 8))
         ttk.Button(
             acciones,
             text="Configuración",
+            style="Cabecera.TButton",
             command=self._abrir_configuracion,
         ).pack(side="right")
 
-        self._var_estado_app = tk.StringVar(value="Listo")
+        self._var_estado_app = tk.StringVar(value="Sistema operativo")
         self._badge_estado_app = tk.Frame(
             cabecera,
-            bg=SEMANTICA["success"][0],
-            highlightbackground=SEMANTICA["success"][2],
+            bg="#0E2A63",
+            highlightbackground="#2E5AA8",
             highlightthickness=1,
             bd=0,
         )
-        self._badge_estado_app.pack(side="right", padx=(0, 20))
+        self._badge_estado_app.pack(side="right", padx=(0, 18))
         self._punto_estado_app = tk.Canvas(
             self._badge_estado_app,
             width=8,
             height=8,
-            bg=SEMANTICA["success"][0],
+            bg="#0E2A63",
             highlightthickness=0,
             bd=0,
         )
         self._punto_estado_app_item = self._punto_estado_app.create_oval(
-            1, 1, 7, 7, fill=SEMANTICA["success"][1], outline=""
+            1, 1, 7, 7, fill="#5EE2A0", outline=""
         )
         self._punto_estado_app.pack(side="left", padx=(10, 0))
         self._lbl_estado_app = tk.Label(
             self._badge_estado_app,
             textvariable=self._var_estado_app,
-            bg=SEMANTICA["success"][0],
-            fg=SEMANTICA["success"][1],
-            font=("Segoe UI", 9, "bold"),
+            bg="#0E2A63",
+            fg="#A7F3D0",
+            font=(ui_tema.FUENTE, 9, "bold"),
             pady=5,
         )
         self._lbl_estado_app.pack(side="left", padx=(6, 12))
 
-        tk.Frame(self, bg=COLOR_BORDE, height=1).pack(side="top", fill="x")
-
     def _pintar_estado_app(self, texto: str, tipo: str = "success") -> None:
-        fondo, color, borde = SEMANTICA.get(tipo, SEMANTICA["neutral"])
+        tonos = {
+            "success": "#7EF0BE",
+            "warning": "#FBD38D",
+            "danger": "#FCA5A5",
+            "info": "#93C5FD",
+            "neutral": "#C7D2E5",
+        }
+        color = tonos.get(tipo, tonos["neutral"])
         self._var_estado_app.set(texto)
-        self._badge_estado_app.configure(bg=fondo, highlightbackground=borde)
-        self._punto_estado_app.configure(bg=fondo)
+        self._badge_estado_app.configure(bg="#0E2A63", highlightbackground=color)
+        self._punto_estado_app.configure(bg="#0E2A63")
         self._punto_estado_app.itemconfigure(self._punto_estado_app_item, fill=color)
-        self._lbl_estado_app.configure(bg=fondo, fg=color)
+        self._lbl_estado_app.configure(bg="#0E2A63", fg=color)
+
+    # ------------------------------------------------------------------
+    # Navegación lateral
+    # ------------------------------------------------------------------
+    _SECCIONES = (
+        ("▦", "Panel Principal"),
+        ("⇩", "Cargar y Procesar"),
+        ("👥", "Usuarios y Áreas"),
+        ("↻", "Reimportar Correcciones"),
+        ("▤", "Maestro Histórico"),
+        ("▥", "Reportes"),
+        ("🛡", "Auditoría"),
+    )
+
+    def _seleccionar_seccion(self, indice: int) -> None:
+        if not hasattr(self, "_cuaderno"):
+            return
+        self._cuaderno.select(indice)
+        for posicion, boton in enumerate(self._botones_nav):
+            boton.marcar_activo(posicion == indice)
+        if indice == 0:
+            self._refrescar_panel()
+
+    def _construir_barra_lateral(self, padre: tk.Misc) -> None:
+        barra = tk.Frame(padre, bg=AZUL_MARINO, width=232)
+        barra.pack(side="left", fill="y")
+        barra.pack_propagate(False)
+
+        marca = tk.Frame(barra, bg=AZUL_MARINO)
+        marca.pack(fill="x", pady=(18, 14), padx=18)
+        tk.Label(
+            marca,
+            text="MENÚ PRINCIPAL",
+            bg=AZUL_MARINO,
+            fg="#7FA4E0",
+            font=(ui_tema.FUENTE, 8, "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+
+        self._botones_nav: list[BotonNavegacion] = []
+        for indice, (icono, texto) in enumerate(self._SECCIONES):
+            boton = BotonNavegacion(
+                barra,
+                icono=icono,
+                texto=texto,
+                comando=lambda i=indice: self._seleccionar_seccion(i),
+            )
+            boton.pack(fill="x", padx=8, pady=2)
+            self._botones_nav.append(boton)
+        self._botones_nav[0].marcar_activo(True)
+
+        pie = tk.Frame(barra, bg=AZUL_MARINO)
+        pie.pack(side="bottom", fill="x", padx=16, pady=18)
+        tk.Frame(pie, bg="#2E5AA8", height=1).pack(fill="x", pady=(0, 14))
+        tk.Label(
+            pie,
+            text="INKACROPS",
+            bg=AZUL_MARINO,
+            fg=BLANCO,
+            font=(ui_tema.FUENTE, 15, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            pie,
+            text="Tecnología que impulsa",
+            bg=AZUL_MARINO,
+            fg="#8FB4E8",
+            font=(ui_tema.FUENTE, 8),
+        ).pack(anchor="w", pady=(0, 8))
+        ttk.Button(
+            pie,
+            text="Conexión SQL Server",
+            style="Cabecera.TButton",
+            command=self._abrir_configuracion_sql,
+        ).pack(fill="x")
 
     def _abrir_configuracion(self) -> None:
         VentanaConfiguracion(self).wait_window()
+
+    def _abrir_configuracion_sql(self) -> None:
+        VentanaConfiguracion(self, seccion="sql").wait_window()
 
     def _abrir_guia_uso(self) -> None:
         VentanaGuiaUso(self).wait_window()
 
     def _crear_pestanas(self) -> None:
-        contenedor = ttk.Frame(self, padding=(12, 8, 12, 12))
-        contenedor.pack(fill="both", expand=True)
+        cuerpo = tk.Frame(self, bg=COLOR_FONDO)
+        cuerpo.pack(fill="both", expand=True)
+        self._construir_barra_lateral(cuerpo)
+
+        contenedor = tk.Frame(cuerpo, bg=COLOR_FONDO)
+        contenedor.pack(side="left", fill="both", expand=True, padx=(14, 14), pady=(12, 12))
 
         self._cuaderno = ttk.Notebook(contenedor)
         self._cuaderno.pack(fill="both", expand=True)
@@ -635,6 +1321,7 @@ class AplicacionTk(tk.Tk):
         self._cuaderno.add(self._tab_maestro, text="Maestro histórico")
         self._cuaderno.add(self._tab_reportes, text="Reportes")
         self._cuaderno.add(self._tab_auditoria, text="Auditoría")
+        self._cuaderno.bind("<<NotebookTabChanged>>", self._al_cambiar_pestana)
 
         self._construir_panel()
         self._construir_procesar()
@@ -643,6 +1330,14 @@ class AplicacionTk(tk.Tk):
         self._construir_maestro()
         self._construir_reportes()
         self._construir_auditoria()
+
+    def _al_cambiar_pestana(self, _evento=None) -> None:
+        try:
+            indice = self._cuaderno.index(self._cuaderno.select())
+        except (tk.TclError, ValueError):
+            return
+        for posicion, boton in enumerate(getattr(self, "_botones_nav", [])):
+            boton.marcar_activo(posicion == indice)
 
     # ------------------------------------------------------------------
     # Panel principal
@@ -967,6 +1662,8 @@ class AplicacionTk(tk.Tk):
             return
         ruta = Path(ruta_texto)
         hoja = self._preview_info["hoja"]
+        self._ruta_entrada_actual = str(ruta)
+        self._hoja_entrada_actual = hoja
 
         self._iniciar_ocupado("Procesando archivo…")
         self._barra.configure(mode="indeterminate")
@@ -982,6 +1679,9 @@ class AplicacionTk(tk.Tk):
                     sobrescribir=False,
                     formato_fecha=cfg.FORMATO_FECHA_PREFERIDO,
                     usuario_ejecutor=os.getenv("USERNAME", ""),
+                    modo=cfg.MODO_NORMAL,
+                    permitir_pendientes=True,
+                    crear_revision=True,
                 )
 
         self._ejecutar_hilo(tarea, self._fin_procesar, "procesamiento")

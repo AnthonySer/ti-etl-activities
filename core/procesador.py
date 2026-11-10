@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 
 from config import configuracion as cfg
-from core import auditoria
+from core import auditoria, procedencia
 from core.archivos import ErrorArchivo, escribir_json_atomico
 from core.esquema import (
     C_AREA,
@@ -28,8 +28,15 @@ from core.esquema import (
 from core.etl import extraer
 from core.maestro import Maestro
 from core.normalizador import limpiar_area, normalizar_usuario
-from core.procesado import escribir_procesado, resolver_salida
+from core.procesado import (
+    copiar_revision,
+    escribir_procesado,
+    respaldar_si_existe,
+    resolver_salida,
+)
 from core.retroalimentacion import ruta_manifiesto
+from core.revision import Revision
+from database.normalizador import normalizar_nombre
 
 LOGGER = logging.getLogger("automatizador")
 
@@ -72,6 +79,14 @@ class EstadisticasProcesamiento:
     filas_vacias_omitidas: int = 0
     observaciones: int = 0
     ruta_reporte: str | None = None
+    modo_generacion: str = cfg.MODO_LEGACY
+    areas_sql: int = 0
+    conflictos: int = 0
+    usuarios_conflicto: int = 0
+    ruta_revision: str | None = None
+    ruta_copia_revision: str | None = None
+    generacion_parcial: bool = False
+    advertencias: int = 0
 
     def como_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -135,6 +150,152 @@ def _prioridad(estado: str) -> int:
     return _PRECEDENCIA.get(estado, 0)
 
 
+def _sql_configurada(usar_sql: bool | None) -> Any | None:
+    """Devuelve la configuración SQL solo si la integración puede usarse."""
+
+    if usar_sql is False:
+        return None
+    try:
+        from config.sqlserver import cargar_configuracion
+        from database.connection import controlador_disponible
+
+        config = cargar_configuracion()
+    except Exception as exc:  # noqa: BLE001 - la integración es opcional
+        LOGGER.warning("No se pudo cargar la configuración SQL: %s", exc)
+        return None
+    if usar_sql is True:
+        return config
+    if config.habilitado and config.configurada and controlador_disponible():
+        return config
+    return None
+
+
+def _resolver_pendientes_sql(
+    pendientes: dict[str, dict[str, Any]],
+    filas: list[dict[str, Any]],
+    maestro: Maestro,
+    config: Any,
+    ejecucion: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]], int, int, list[dict[str, str]]]:
+    """Resuelve pendientes contra SQL Server en un solo lote.
+
+    Devuelve ``(resoluciones, conflictos, areas_asignadas, filas_asignadas,
+    errores)``. Nunca lanza: un fallo de SQL Server deja los pendientes intactos.
+    """
+
+    from database.repository import RepositorioEmpleados
+    from database.resolucion import ESTADO_VALIDADO, ResolverAreas
+    from database.synchronizer import Sincronizador, cargar_empleados
+
+    errores: list[dict[str, str]] = []
+    nombres = [str(item.get("usuario") or "") for item in pendientes.values()]
+    nombres = [nombre for nombre in nombres if nombre]
+    if not nombres:
+        return {}, [], 0, 0, errores
+
+    try:
+        empleados = cargar_empleados()
+        resolver = ResolverAreas(empleados, maestro=maestro)
+        resoluciones = resolver.resolver_lote(nombres)
+
+        faltantes = [
+            resultado.usuario
+            for resultado in resoluciones.values()
+            if resultado.caso == "C"
+        ]
+        if faltantes:
+            repositorio = RepositorioEmpleados(config)
+            consulta = repositorio.buscar_por_nombres(faltantes)
+            errores.extend(consulta.errores)
+            if consulta.empleados:
+                Sincronizador(
+                    config, repositorio=repositorio
+                ).actualizar_desde_busqueda(consulta.empleados)
+                empleados = cargar_empleados()
+                resolver = ResolverAreas(empleados, maestro=maestro)
+                resoluciones = resolver.resolver_lote(nombres)
+    except Exception as exc:  # noqa: BLE001 - SQL no debe bloquear el ETL
+        LOGGER.warning("No se pudo resolver contra SQL Server: %s", exc)
+        return {}, [], 0, 0, errores
+
+    # Índice de filas por clave de usuario (normalización del procesador).
+    filas_por_clave: dict[str, list[dict[str, Any]]] = {}
+    for fila in filas:
+        clave = normalizar_usuario(fila.get(C_SOLICITANTE))
+        if clave:
+            filas_por_clave.setdefault(clave, []).append(fila)
+
+    areas_asignadas = 0
+    filas_asignadas = 0
+    conflictos: list[dict[str, Any]] = []
+
+    for clave, item in list(pendientes.items()):
+        clave_sql = normalizar_nombre(item.get("usuario"))
+        resultado = resoluciones.get(clave_sql)
+        if resultado is None:
+            continue
+
+        if resultado.conflicto or resultado.estado in {
+            "Conflicto con maestro",
+            "Asignación manual protegida",
+        }:
+            conflicto = resultado.como_dict()
+            conflicto["filas"] = list(item.get("filas") or [])
+            conflictos.append(conflicto)
+            continue
+
+        if resultado.caso != "A" or not resultado.asignable:
+            continue
+
+        for fila in filas_por_clave.get(clave, []):
+            fila[C_AREA] = resultado.area
+            fila["_area_origen"] = "sql_server"
+            if fila.get("_estado") == ESTADO_PENDIENTE:
+                tiene_error = any(
+                    str(observacion.get("severidad")) == "error"
+                    for observacion in fila.get("_observaciones") or []
+                )
+                fila["_estado"] = ESTADO_OBSERVADO if tiene_error else ESTADO_VALIDADO
+
+        procedencia.registrar(
+            item.get("usuario"),
+            resultado.area,
+            procedencia.SQL_SERVER,
+            id_ejecucion=ejecucion,
+            nota=resultado.motivo,
+        )
+        areas_asignadas += 1
+        filas_asignadas += len(item.get("filas") or [])
+        pendientes.pop(clave, None)
+
+    return resoluciones, conflictos, areas_asignadas, filas_asignadas, errores
+
+
+def _crear_revision(
+    datos_manifiesto: dict[str, Any],
+    resoluciones: dict[str, Any],
+    conflictos: list[dict[str, Any]],
+    *,
+    archivo_procesado: str,
+    archivo_manifiesto: str,
+) -> str | None:
+    try:
+        revision = Revision.desde_manifiesto(
+            datos_manifiesto,
+            resoluciones={
+                clave: resultado.como_dict()
+                for clave, resultado in resoluciones.items()
+            },
+            archivo_procesado=archivo_procesado,
+            archivo_manifiesto=archivo_manifiesto,
+            conflictos=conflictos,
+        )
+        return str(revision.guardar())
+    except Exception as exc:  # noqa: BLE001 - la revisión no bloquea la salida
+        LOGGER.error("No se pudo guardar el estado de revisión: %s", exc)
+        return None
+
+
 def procesar_archivo(
     ruta_entrada: Path | str,
     maestro: Maestro | None,
@@ -145,12 +306,28 @@ def procesar_archivo(
     id_ejecucion: str | None = None,
     usuario_ejecutor: str = "",
     registrar_auditoria: bool = True,
+    *,
+    modo: str | None = None,
+    permitir_pendientes: bool = True,
+    usar_sql: bool | None = None,
+    crear_revision: bool = False,
+    crear_respaldo: bool = False,
+    crear_copia_revision: bool = False,
 ) -> EstadisticasProcesamiento:
-    """Procesa un Excel, asigna áreas y genera el archivo de 11 columnas."""
+    """Procesa un Excel, asigna áreas y genera el archivo de 11 columnas.
+
+    ``modo=None`` conserva el comportamiento histórico (5 hojas y hoja
+    ``Tickets``) para no romper la consola ni los archivos existentes. La
+    interfaz usa ``modo='normal'`` o ``modo='detalle'`` con la hoja canónica
+    ``Consulta``.
+    """
 
     ruta_entrada = Path(ruta_entrada)
     maestro = maestro or Maestro()
     ejecucion = id_ejecucion or auditoria.nueva_ejecucion()
+    modo_efectivo = str(modo or cfg.MODO_LEGACY).lower()
+    if modo_efectivo not in (cfg.MODO_LEGACY, cfg.MODO_NORMAL, cfg.MODO_DETALLE):
+        raise ErrorArchivo(f"Modo de generación no válido: {modo}")
 
     extraccion = extraer(ruta_entrada, hoja=hoja, formato_fecha=formato_fecha)
     df = extraccion.df.copy()
@@ -174,6 +351,7 @@ def procesar_archivo(
     sin_usuario = 0
     total_horas = 0.0
     vistos: dict[str, int] = {}
+    legacy_registros: list[dict[str, str]] = []
 
     filas: list[dict[str, Any]] = []
 
@@ -211,6 +389,15 @@ def procesar_archivo(
                     },
                 )
                 item["filas"].append(fila.get("_fila_origen"))
+                legacy_registros.append(
+                    {
+                        "usuario": usuario_original or clave,
+                        "area": area_maestro,
+                        "origen": procedencia.MANUAL,
+                        "id_ejecucion": ejecucion,
+                        "nota": "Área registrada en el maestro local.",
+                    }
+                )
             else:
                 item = usuarios_pendientes.setdefault(
                     clave,
@@ -227,6 +414,15 @@ def procesar_archivo(
                     origen_area = "preexistente"
                     preservadas += 1
                     fila[C_AREA] = area_existente
+                    legacy_registros.append(
+                        {
+                            "usuario": usuario_original or clave,
+                            "area": area_existente,
+                            "origen": procedencia.LEGACY,
+                            "id_ejecucion": ejecucion,
+                            "nota": "Área conservada del archivo de tickets.",
+                        }
+                    )
                     pre = preexistentes.setdefault(
                         clave,
                         {
@@ -283,6 +479,50 @@ def procesar_archivo(
 
         filas.append(fila)
 
+    resoluciones: dict[str, Any] = {}
+    conflictos: list[dict[str, Any]] = []
+    areas_sql = 0
+    errores_sql: list[dict[str, str]] = []
+
+    config_sql = _sql_configurada(usar_sql)
+    if legacy_registros:
+        try:
+            procedencia.registrar_lote(
+                legacy_registros, id_ejecucion=ejecucion
+            )
+        except Exception as exc:  # noqa: BLE001 - trazabilidad no bloquea
+            LOGGER.warning("No se pudo registrar la procedencia local: %s", exc)
+    if config_sql is not None and usuarios_pendientes:
+        (
+            resoluciones,
+            conflictos,
+            areas_sql,
+            filas_sql,
+            errores_sql,
+        ) = _resolver_pendientes_sql(
+            usuarios_pendientes, filas, maestro, config_sql, ejecucion
+        )
+        if areas_sql:
+            areas_asignadas += areas_sql
+            registros_pendientes = max(0, registros_pendientes - filas_sql)
+        for error in errores_sql:
+            LOGGER.warning(
+                "SQL Server (%s): %s",
+                error.get("empresa", ""),
+                error.get("mensaje", ""),
+            )
+
+    if (
+        modo_efectivo == cfg.MODO_NORMAL
+        and registros_pendientes > 0
+        and not permitir_pendientes
+    ):
+        raise ErrorArchivo(
+            "No se puede generar el Excel completo: existen "
+            f"{registros_pendientes} registros sin área validada. "
+            "Use 'Generar Excel con pendientes' o complete la validación."
+        )
+
     df_procesado = pd.DataFrame(filas)
     for columna in COLUMNAS_OFICIALES:
         if columna not in df_procesado.columns:
@@ -295,7 +535,15 @@ def procesar_archivo(
 
     conteos = df_procesado["_estado"].value_counts().to_dict() if len(df_procesado) else {}
 
+    if modo_efectivo == cfg.MODO_DETALLE and ruta_salida is None:
+        ruta_salida = (
+            cfg.OUTPUT_DIR / f"{ruta_entrada.stem}_procesado_detalle.xlsx"
+        )
     destino = resolver_salida(ruta_entrada, ruta_salida, sobrescribir)
+    respaldo_destino = crear_respaldo or modo_efectivo in (
+        cfg.MODO_NORMAL,
+        cfg.MODO_DETALLE,
+    )
 
     resumen = {
         "Total de registros": len(df_procesado),
@@ -310,6 +558,8 @@ def procesar_archivo(
         "Solicitantes únicos": len(usuarios_unicos),
         "Áreas asignadas automáticamente": areas_asignadas,
         "Áreas preexistentes preservadas": preservadas,
+        "Áreas obtenidas de SQL Server": areas_sql,
+        "Conflictos de área detectados": len(conflictos),
     }
 
     meta = {
@@ -324,6 +574,8 @@ def procesar_archivo(
         "Correspondencias en base de áreas": len(maestro),
         "Estructura oficial": "11 columnas: " + ", ".join(COLUMNAS_OFICIALES),
         "Filas vacías omitidas": extraccion.filas_vacias_omitidas,
+        "Modo de generación": modo_efectivo,
+        "Generación parcial": "Sí" if registros_pendientes > 0 else "No",
     }
 
     escribir_procesado(
@@ -333,6 +585,8 @@ def procesar_archivo(
         extras=extraccion.extras,
         resumen=resumen,
         meta=meta,
+        modo=modo_efectivo,
+        crear_respaldo=respaldo_destino,
     )
 
     ruta_json = ruta_manifiesto(destino)
@@ -351,6 +605,19 @@ def procesar_archivo(
         "mapeo_columnas": extraccion.mapeo,
         "maestro_correspondencias": len(maestro),
         "fecha_archivo_ns": ruta_entrada.stat().st_mtime_ns,
+        "modo_generacion": modo_efectivo,
+        "hoja_principal": (
+            cfg.HOJA_CONSULTA
+            if modo_efectivo in (cfg.MODO_NORMAL, cfg.MODO_DETALLE)
+            else cfg.HOJA_DETALLE
+        ),
+        "generacion_parcial": registros_pendientes > 0,
+        "resoluciones_sql": {
+            clave: resultado.como_dict()
+            for clave, resultado in resoluciones.items()
+        },
+        "conflictos": conflictos,
+        "errores_sql": errores_sql,
         "resumen": resumen,
         "filas": [
             {
@@ -380,6 +647,23 @@ def procesar_archivo(
             exc,
         )
 
+    ruta_copia_revision: str | None = None
+    if crear_copia_revision or modo_efectivo in (cfg.MODO_NORMAL, cfg.MODO_DETALLE):
+        try:
+            ruta_copia_revision = str(copiar_revision(destino))
+        except Exception as exc:  # noqa: BLE001 - la copia no bloquea la salida
+            LOGGER.error("No se pudo crear la copia de revisión: %s", exc)
+
+    ruta_revision: str | None = None
+    if crear_revision and (usuarios_pendientes or conflictos):
+        ruta_revision = _crear_revision(
+            datos_manifiesto,
+            resoluciones,
+            conflictos,
+            archivo_procesado=str(destino),
+            archivo_manifiesto=archivo_manifiesto or "",
+        )
+
     estadisticas = EstadisticasProcesamiento(
         archivo_entrada=ruta_entrada.name,
         hoja=extraccion.hoja,
@@ -402,6 +686,14 @@ def procesar_archivo(
         periodo=extraccion.periodo or "",
         filas_vacias_omitidas=extraccion.filas_vacias_omitidas,
         observaciones=len(observaciones),
+        modo_generacion=modo_efectivo,
+        areas_sql=areas_sql,
+        conflictos=len(conflictos),
+        usuarios_conflicto=len(conflictos),
+        ruta_revision=ruta_revision,
+        ruta_copia_revision=ruta_copia_revision,
+        generacion_parcial=registros_pendientes > 0,
+        advertencias=len(errores_sql),
     )
 
     if registrar_auditoria:

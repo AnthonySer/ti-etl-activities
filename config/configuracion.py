@@ -32,6 +32,7 @@ INPUT_DIR = BASE_DIR / DEFAULT_CONFIG["input_dir"]
 OUTPUT_DIR = BASE_DIR / DEFAULT_CONFIG["output_dir"]
 DATA_DIR = BASE_DIR / DEFAULT_CONFIG["data_dir"]
 BACKUPS_DIR = BASE_DIR / DEFAULT_CONFIG["backups_dir"]
+REVISION_DIR = BASE_DIR / DEFAULT_CONFIG["revision_dir"]
 LOGS_DIR = BASE_DIR / DEFAULT_CONFIG["logs_dir"]
 REPORTES_DIR = BASE_DIR / DEFAULT_CONFIG["reportes_dir"]
 
@@ -53,6 +54,9 @@ ESTADO_UI_JSON = DATA_DIR / "estado_ui.json"
 
 # Bloqueo cooperativo para evitar dos escrituras simultáneas.
 LOCK_SISTEMA = DATA_DIR / ".sistema.lock"
+
+# Retención de copias y revisiones.
+MAX_BACKUPS = int(DEFAULT_CONFIG["max_backups"])
 
 # ---------------------------------------------------------------------------
 # Archivos históricos de referencia y columnas del maestro de áreas
@@ -78,9 +82,18 @@ FORMATO_FECHA_ALTERNATIVO = "YYYY-MM-DD"
 FORMATO_FECHA_EXCEL = "DD/MM/YYYY"
 
 # Hoja principal del Excel procesado y del maestro histórico.
+# ``HOJA_CONSULTA`` es la hoja canónica nueva; ``HOJA_DETALLE`` se conserva por
+# compatibilidad con los archivos históricos y las pruebas existentes.
+HOJA_CONSULTA = "Consulta"
 HOJA_DETALLE = "Tickets"
 HOJA_MAESTRO = "MAESTRO"
 HOJA_CONTROL = "CONTROL"
+
+# Modos de generación del Excel procesado.
+MODO_NORMAL = "normal"
+MODO_DETALLE = "detalle"
+MODO_LEGACY = "legacy"
+MODOS_GENERACION = (MODO_NORMAL, MODO_DETALLE)
 
 # Umbrales de coincidencia al reimportar un Excel corregido.
 UMBRAL_COINCIDENCIA = 0.78
@@ -242,6 +255,7 @@ def aplicar_configuracion(config: dict[str, Any]) -> dict[str, Any]:
     globals()["OUTPUT_DIR"] = _ruta_config(validada["output_dir"], DEFAULT_CONFIG["output_dir"])
     globals()["DATA_DIR"] = _ruta_config(validada["data_dir"], DEFAULT_CONFIG["data_dir"])
     globals()["BACKUPS_DIR"] = _ruta_config(validada["backups_dir"], DEFAULT_CONFIG["backups_dir"])
+    globals()["REVISION_DIR"] = _ruta_config(validada["revision_dir"], DEFAULT_CONFIG["revision_dir"])
     globals()["LOGS_DIR"] = _ruta_config(validada["logs_dir"], DEFAULT_CONFIG["logs_dir"])
     globals()["REPORTES_DIR"] = _ruta_config(validada["reportes_dir"], DEFAULT_CONFIG["reportes_dir"])
     globals()["AUDITORIA_CSV"] = _ruta_config(validada["auditoria_csv"], DEFAULT_CONFIG["auditoria_csv"])
@@ -280,6 +294,7 @@ def asegurar_directorios() -> None:
         OUTPUT_DIR,
         DATA_DIR,
         BACKUPS_DIR,
+        REVISION_DIR,
         LOGS_DIR,
         REPORTES_DIR,
     ):

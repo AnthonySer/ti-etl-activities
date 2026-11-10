@@ -407,14 +407,15 @@ def _escribir_extras(hoja: Worksheet, extras: pd.DataFrame) -> None:
     hoja.auto_filter.ref = f"A1:{get_column_letter(len(encabezados))}{max(ultima, 1)}"
 
 
-def _verificar_libro(ruta: Path) -> None:
+def _verificar_libro(ruta: Path, hoja_esperada: str | None = None) -> None:
+    hoja_esperada = hoja_esperada or cfg.HOJA_DETALLE
     libro = load_workbook(ruta, read_only=True)
     try:
-        if cfg.HOJA_DETALLE not in libro.sheetnames:
+        if hoja_esperada not in libro.sheetnames:
             raise ErrorArchivo(
-                f"El archivo generado no contiene la hoja '{cfg.HOJA_DETALLE}'."
+                f"El archivo generado no contiene la hoja '{hoja_esperada}'."
             )
-        hoja = libro[cfg.HOJA_DETALLE]
+        hoja = libro[hoja_esperada]
         encabezados = next(hoja.iter_rows(min_row=1, max_row=1, values_only=True))
         validar_estructura_exacta(encabezados, contexto="archivo procesado")
         if hoja.max_column != len(COLUMNAS_OFICIALES):
@@ -425,6 +426,65 @@ def _verificar_libro(ruta: Path) -> None:
         libro.close()
 
 
+def rotar_respaldos(destino: Path, limite: int | None = None) -> None:
+    """Conserva solo las últimas copias de un mismo archivo lógico."""
+
+    destino = Path(destino)
+    carpeta = Path(cfg.BACKUPS_DIR)
+    if not carpeta.is_dir():
+        return
+    limite = int(cfg.MAX_BACKUPS if limite is None else limite)
+    if limite < 1:
+        return
+    copias = sorted(
+        carpeta.glob(f"{destino.stem}_*{destino.suffix}"),
+        key=lambda ruta: ruta.stat().st_mtime,
+        reverse=True,
+    )
+    for copia in copias[limite:]:
+        try:
+            copia.unlink()
+        except OSError:
+            LOGGER.debug("No se pudo eliminar el respaldo antiguo %s", copia)
+
+
+def respaldar_si_existe(destino: Path, limite: int | None = None) -> Path | None:
+    """Crea una copia antes de sobrescribir; si falla, no se escribe nada."""
+
+    from core.archivos import respaldar_archivo
+
+    destino = Path(destino)
+    if not destino.is_file():
+        return None
+    copia = respaldar_archivo(destino, cfg.BACKUPS_DIR)
+    rotar_respaldos(destino, limite)
+    return copia
+
+
+def copiar_revision(destino: Path) -> Path:
+    """Copia el resultado a la carpeta de revisión junto con su manifiesto."""
+
+    import shutil
+
+    destino = Path(destino)
+    carpeta = Path(cfg.REVISION_DIR)
+    carpeta.mkdir(parents=True, exist_ok=True)
+    marca = datetime.now().strftime("%Y%m%d_%H%M%S")
+    copia = carpeta / f"{destino.stem}_revision_{marca}{destino.suffix}"
+    contador = 2
+    while copia.exists():
+        copia = carpeta / f"{destino.stem}_revision_{marca}_v{contador}{destino.suffix}"
+        contador += 1
+    shutil.copy2(destino, copia)
+    manifiesto = destino.with_name(f"{destino.stem}{cfg.SUFIJO_MANIFIESTO}")
+    if manifiesto.is_file():
+        shutil.copy2(
+            manifiesto,
+            copia.with_name(f"{copia.stem}{cfg.SUFIJO_MANIFIESTO}"),
+        )
+    return copia
+
+
 def escribir_procesado(
     df: pd.DataFrame,
     destino: Path,
@@ -433,11 +493,30 @@ def escribir_procesado(
     extras: pd.DataFrame | None = None,
     resumen: Mapping[str, Any] | None = None,
     meta: Mapping[str, Any] | None = None,
+    modo: str = cfg.MODO_LEGACY,
+    hoja: str | None = None,
+    crear_respaldo: bool = False,
+    crear_copia_revision: bool = False,
 ) -> Path:
-    """Escribe el Excel procesado de forma atómica y valida su estructura."""
+    """Escribe el Excel procesado de forma atómica y valida su estructura.
+
+    ``modo`` controla el formato de salida:
+
+    * ``legacy``: comportamiento histórico (5 hojas y hoja ``Tickets``).
+    * ``normal``: una sola hoja ``Consulta`` con las 11 columnas oficiales.
+    * ``detalle``: cinco hojas con ``Consulta`` como hoja principal.
+    """
+
+    modo = str(modo or cfg.MODO_LEGACY).lower()
+    if modo not in (cfg.MODO_LEGACY, cfg.MODO_NORMAL, cfg.MODO_DETALLE):
+        raise ErrorArchivo(f"Modo de generación no válido: {modo}")
 
     destino = Path(destino)
     destino.parent.mkdir(parents=True, exist_ok=True)
+
+    if crear_respaldo:
+        # Si el respaldo falla se propaga el error y no se sobrescribe nada.
+        respaldar_si_existe(destino)
 
     descriptor, nombre_temporal = tempfile.mkstemp(
         prefix=f".{destino.stem}_",
@@ -449,20 +528,30 @@ def escribir_procesado(
 
     try:
         libro = Workbook()
-        hoja = libro.active
-        hoja.title = cfg.HOJA_DETALLE
-        escribir_detalle(hoja, df)
+        hoja_principal = libro.active
+        if modo == cfg.MODO_LEGACY:
+            hoja_principal.title = hoja or cfg.HOJA_DETALLE
+        else:
+            hoja_principal.title = hoja or cfg.HOJA_CONSULTA
+        escribir_detalle(hoja_principal, df)
 
-        _escribir_observaciones(libro.create_sheet("Observaciones"), observaciones)
-        _escribir_resumen(libro.create_sheet("Resumen"), df, resumen, meta)
-        _escribir_control(libro.create_sheet("Control"), meta or {})
-        if extras is not None and len(extras):
-            _escribir_extras(libro.create_sheet("Origen_Adicional"), extras)
+        if modo != cfg.MODO_NORMAL:
+            _escribir_observaciones(libro.create_sheet("Observaciones"), observaciones)
+            _escribir_resumen(libro.create_sheet("Resumen"), df, resumen, meta)
+            _escribir_control(libro.create_sheet("Control"), meta or {})
+            if extras is not None and len(extras):
+                _escribir_extras(libro.create_sheet("Origen_Adicional"), extras)
+            elif modo == cfg.MODO_DETALLE:
+                # El modo a detalle siempre declara las cinco hojas.
+                _escribir_extras(
+                    libro.create_sheet("Origen_Adicional"),
+                    pd.DataFrame(columns=["Sin datos adicionales"]),
+                )
 
         libro.save(temporal)
         libro.close()
 
-        _verificar_libro(temporal)
+        _verificar_libro(temporal, hoja_principal.title)
         os.replace(temporal, destino)
 
     except PermissionError as exc:
@@ -482,6 +571,9 @@ def escribir_procesado(
             temporal.unlink(missing_ok=True)
         except OSError:
             pass
+
+    if crear_copia_revision:
+        copiar_revision(destino)
 
     return destino
 
