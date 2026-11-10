@@ -969,8 +969,24 @@ class PruebasReportes(BaseTemporal):
             self.assertEqual(libro["PROYECTOS"]["A5"].value, "TOTAL GENERAL")
             self.assertEqual(libro["PROYECTOS"]["B5"].value, 10.0)
             self.assertAlmostEqual(libro["PROYECTOS"]["C5"].value, 1.0)
-            self.assertEqual(libro["ACTIVIDAD"]["A5"].value, "TOTAL GENERAL")
-            self.assertEqual(libro["ACTIVIDAD"]["B5"].value, 3)
+            self.assertEqual(
+                [
+                    fila[0]
+                    for fila in libro["ACTIVIDAD"].iter_rows(
+                        min_row=2, max_row=3, values_only=True
+                    )
+                ],
+                ["Incidencia", "Solicitud"],
+            )
+            self.assertNotIn(
+                "Proyecto",
+                [
+                    fila[0]
+                    for fila in libro["ACTIVIDAD"].iter_rows(values_only=True)
+                ],
+            )
+            self.assertEqual(libro["ACTIVIDAD"]["A4"].value, "TOTAL GENERAL")
+            self.assertEqual(libro["ACTIVIDAD"]["B4"].value, 3)
             self.assertEqual(libro["AREA"]["A5"].value, "TOTAL GENERAL")
             self.assertEqual(libro["AREA"]["B5"].value, 4)
             self.assertEqual(
@@ -1078,7 +1094,9 @@ class PruebasReportes(BaseTemporal):
             self.assertEqual(libro["RESUMEN"]["C3"].value, 0)
             self.assertEqual(libro["PROYECTOS"]["A2"].value, "TOTAL GENERAL")
             self.assertEqual(libro["PROYECTOS"]["B2"].value, 0)
-            self.assertEqual(libro["ACTIVIDAD"]["A2"].value, "Sin requerimiento")
+            self.assertEqual(libro["ACTIVIDAD"]["A2"].value, "Incidencia")
+            self.assertEqual(libro["ACTIVIDAD"]["B2"].value, 1)
+            self.assertEqual(libro["ACTIVIDAD"]["A3"].value, "TOTAL GENERAL")
             self.assertEqual(libro["ACTIVIDAD"]["B3"].value, 1)
             self.assertEqual(libro["AREA"]["A2"].value, "Sin área")
             self.assertEqual(libro["AREA"]["B3"].value, 1)
