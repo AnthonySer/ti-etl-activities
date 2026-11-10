@@ -275,6 +275,8 @@ def leer_corregido(
                 f"Hojas: {', '.join(hojas)}"
             )
         hoja_elegida = hoja
+    elif cfg.HOJA_CONSULTA in hojas:
+        hoja_elegida = cfg.HOJA_CONSULTA
     elif cfg.HOJA_DETALLE in hojas:
         hoja_elegida = cfg.HOJA_DETALLE
     else:

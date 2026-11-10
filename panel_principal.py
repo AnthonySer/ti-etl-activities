@@ -28,28 +28,21 @@ from tkinter import font as tkfont
 from typing import Callable, Sequence
 
 # ---------------------------------------------------------------------------
-# Design tokens
+# Design tokens (identidad corporativa compartida)
 # ---------------------------------------------------------------------------
-COLOR_FONDO = "#f8fafc"
-COLOR_SUPERFICIE = "#ffffff"
-COLOR_BORDE = "#e2e8f0"
-COLOR_BORDE_FUERTE = "#cbd5e1"
-COLOR_TEXTO = "#0f172a"
-COLOR_TEXTO_SECUNDARIO = "#64748b"
-COLOR_TEXTO_TENUE = "#64748b"  # contraste AA para texto pequeño
-
-COLOR_PRIMARIO = "#2563eb"
-COLOR_PRIMARIO_HOVER = "#1d4ed8"
-COLOR_PRIMARIO_SUAVE = "#eff6ff"
-
-SEMANTICA: dict[str, tuple[str, str, str]] = {
-    # (fondo, texto, borde)
-    "success": ("#dcfce7", "#15803d", "#bbf7d0"),
-    "warning": ("#fef3c7", "#b45309", "#fde68a"),
-    "danger": ("#fee2e2", "#b91c1c", "#fecaca"),
-    "info": ("#dbeafe", "#1d4ed8", "#bfdbfe"),
-    "neutral": ("#f1f5f9", "#475569", "#e2e8f0"),
-}
+from ui_tema import (  # noqa: E402
+    AZUL_HOVER as COLOR_PRIMARIO_HOVER,
+    AZUL_PRINCIPAL as COLOR_PRIMARIO,
+    AZUL_SUAVE as COLOR_PRIMARIO_SUAVE,
+    BORDE as COLOR_BORDE,
+    BORDE_FUERTE as COLOR_BORDE_FUERTE,
+    FONDO as COLOR_FONDO,
+    SEMANTICA,
+    SUPERFICIE as COLOR_SUPERFICIE,
+    TEXTO as COLOR_TEXTO,
+    TEXTO_SECUNDARIO as COLOR_TEXTO_SECUNDARIO,
+    TEXTO_TENUE as COLOR_TEXTO_TENUE,
+)
 
 _FUENTE: str | None = None
 
