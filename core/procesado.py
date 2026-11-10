@@ -570,28 +570,36 @@ def _tabla_proyectos(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _tabla_actividad(df: pd.DataFrame) -> pd.DataFrame:
-    filtrado = df[[C_ACTIVIDAD, C_REQUERIMIENTO]].copy()
-    filtrado = filtrado[filtrado[C_ACTIVIDAD].map(_categoria_actividad).isin({"Incidencia", "Solicitud"})]
-    requerimientos = filtrado[C_REQUERIMIENTO].fillna("").astype(str).str.strip()
-    sin_requerimiento = requerimientos.str.casefold().isin(
-        {"", "nan", "none", "null", "n/a"}
-    )
-    filtrado[C_REQUERIMIENTO] = requerimientos.mask(
-        sin_requerimiento, "Sin requerimiento"
+    """Resume la hoja ACTIVIDAD usando solo la columna oficial ``Actividad``.
+
+    Se incluyen únicamente las categorías Incidencia y Solicitud. Los registros
+    clasificados como Proyecto quedan fuera de la tabla, de los totales y de los
+    porcentajes.
+    """
+
+    categorias = df[C_ACTIVIDAD].map(_categoria_actividad)
+    incluidas = categorias.isin({"Incidencia", "Solicitud"})
+    filtrado = pd.DataFrame(
+        {
+            "TIPO DE ACTIVIDAD": categorias[incluidas],
+        }
     )
     if filtrado.empty:
         filas = []
         total = 0
     else:
-        agrupado = filtrado.groupby(C_REQUERIMIENTO, sort=False).size().reset_index(name="TICKETS")
+        agrupado = filtrado.groupby("TIPO DE ACTIVIDAD", sort=False).size().reset_index(
+            name="TICKETS"
+        )
         total = int(agrupado["TICKETS"].sum())
         agrupado["%"] = agrupado["TICKETS"].apply(
             lambda cantidad: 0.0 if total == 0 else cantidad / total
         )
-        agrupado = agrupado.rename(columns={C_REQUERIMIENTO: "TIPO DE ACTIVIDAD"})
         agrupado["TICKETS"] = agrupado["TICKETS"].astype(int)
         agrupado["%"] = agrupado["%"].round(6)
-        agrupado = agrupado.sort_values(["TICKETS", "TIPO DE ACTIVIDAD"], ascending=[False, True])
+        agrupado = agrupado.sort_values(
+            ["TICKETS", "TIPO DE ACTIVIDAD"], ascending=[False, True]
+        )
         filas = agrupado.to_dict(orient="records")
     filas.append(
         {
