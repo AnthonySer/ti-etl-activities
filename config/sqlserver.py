@@ -73,7 +73,7 @@ class ConfiguracionSQL:
     autenticacion: str = "windows"
     usuario: str = ""
     contrasena: str = field(default="", repr=False)
-    driver: str = "ODBC Driver 18 for SQL Server"
+    driver: str = "ODBC Driver 17 for SQL Server"
     timeout: int = 10
     encriptar: bool = True
     confiar_certificado: bool = True

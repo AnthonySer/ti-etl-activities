@@ -46,24 +46,81 @@ def controlador_disponible() -> bool:
 def _escapar_driver(driver: str) -> str:
     return "{" + driver.replace("}", "}}") + "}"
 
+def _escapar_valor_odbc(valor: str) -> str:
+    """Escapa valores para utilizarlos de forma segura en una cadena ODBC."""
+    return "{" + str(valor).replace("}", "}}") + "}"
+
 
 def construir_cadena_conexion(config: ConfiguracionSQL) -> str:
-    """Construye la cadena ODBC sin registrar la contraseña en claro."""
+    """Construye la cadena ODBC usando un controlador instalado."""
 
     validada = validar_configuracion(config)
+
+    if pyodbc is None:
+        raise ErrorConexionSQL(
+            "El módulo pyodbc no está instalado.",
+            "driver",
+        )
+
+    # Consultar los controladores realmente disponibles.
+    try:
+        drivers_instalados = pyodbc.drivers()
+    except Exception as exc:
+        raise ErrorConexionSQL(
+            f"No se pudieron consultar los controladores ODBC: {exc}",
+            "driver",
+        ) from exc
+
+    # Priorizar el controlador configurado y luego buscar alternativas.
+    candidatos = [
+        validada.driver,
+        "ODBC Driver 18 for SQL Server",
+        "ODBC Driver 17 for SQL Server",
+        "ODBC Driver 13 for SQL Server",
+    ]
+
+    driver_seleccionado = next(
+        (
+            driver
+            for driver in candidatos
+            if driver and driver in drivers_instalados
+        ),
+        None,
+    )
+
+    if not driver_seleccionado:
+        raise ErrorConexionSQL(
+            "No se encontró un controlador ODBC compatible. "
+            f"Controladores detectados: {drivers_instalados}",
+            "driver",
+        )
+
+    # LOGGER.info("Controlador ODBC seleccionado: %s", driver_seleccionado)
+    LOGGER.info(
+        "Configuración SQL: servidor=%s, base=%s, usuario=%s, "
+        "autenticacion_sql=%s, driver=%s",
+        validada.servidor,
+        validada.base_datos,
+        validada.usuario,
+        validada.usa_sql_auth,
+        driver_seleccionado,
+    )
+
     partes = [
-        f"DRIVER={_escapar_driver(validada.driver)}",
+        f"DRIVER={_escapar_driver(driver_seleccionado)}",
         f"SERVER={validada.servidor}",
         f"DATABASE={validada.base_datos}",
         f"Encrypt={'yes' if validada.encriptar else 'no'}",
         f"TrustServerCertificate={'yes' if validada.confiar_certificado else 'no'}",
         f"Connection Timeout={validada.timeout}",
     ]
+
     if validada.usa_sql_auth:
-        partes.append(f"UID={validada.usuario}")
-        partes.append(f"PWD={validada.contrasena}")
+        partes.append(f"UID={_escapar_valor_odbc(validada.usuario)}")
+        partes.append(f"PWD={_escapar_valor_odbc(validada.contrasena)}")
     else:
         partes.append("Trusted_Connection=yes")
+
     return ";".join(partes) + ";"
 
 
