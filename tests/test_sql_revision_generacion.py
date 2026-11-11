@@ -33,7 +33,7 @@ from core.esquema import COLUMNAS_OFICIALES  # noqa: E402
 from core.maestro import Maestro  # noqa: E402
 from core.procesado import rotar_respaldos  # noqa: E402
 from core.procesador import procesar_archivo  # noqa: E402
-from database import connection  # noqa: E402
+from database import connection, queries  # noqa: E402
 from database.connection import (  # noqa: E402
     ErrorConexionSQL,
     conectar,
@@ -197,6 +197,7 @@ class PruebasConexionSQL(unittest.TestCase):
             contrasena="secreto",
         )
         falso = mock.MagicMock()
+        falso.drivers.return_value = ["ODBC Driver 17 for SQL Server"]
         falso.connect.side_effect = Exception("28000 Login failed for user 'lector'")
         with mock.patch.object(connection, "pyodbc", falso):
             with self.assertRaises(ErrorConexionSQL) as ctx:
@@ -214,6 +215,7 @@ class PruebasConexionSQL(unittest.TestCase):
             timeout=3,
         )
         falso = mock.MagicMock()
+        falso.drivers.return_value = ["ODBC Driver 17 for SQL Server"]
         falso.connect.side_effect = Exception("HYT00 Query timeout expired")
         with mock.patch.object(connection, "pyodbc", falso):
             with self.assertRaises(ErrorConexionSQL) as ctx:
@@ -230,6 +232,7 @@ class PruebasConexionSQL(unittest.TestCase):
         )
         conexion = mock.MagicMock()
         falso = mock.MagicMock()
+        falso.drivers.return_value = ["ODBC Driver 17 for SQL Server"]
         falso.connect.return_value = conexion
         with mock.patch.object(connection, "pyodbc", falso):
             with conectar(config) as abierta:
@@ -268,6 +271,11 @@ class PruebasRepositorioSQL(unittest.TestCase):
 
     def test_busqueda_por_lotes_consulta_cada_empresa(self) -> None:
         def ejecutor(conexion, sql, parametros):
+            if "INFORMATION_SCHEMA.COLUMNS" in sql:
+                return [
+                    {"TABLE_NAME": "EMPLEADO", "COLUMN_NAME": columna}
+                    for columna in ("EMPLEADO", "NOMBRE", "ACTIVO")
+                ]
             self.llamadas.append(sql)
             empresa = "CALCA" if "[CALCA]" in sql else "INKA"
             return [
@@ -296,6 +304,11 @@ class PruebasRepositorioSQL(unittest.TestCase):
             return contexto()
 
         def ejecutor(conexion, sql, parametros):
+            if "INFORMATION_SCHEMA.COLUMNS" in sql:
+                return [
+                    {"TABLE_NAME": "EMPLEADO", "COLUMN_NAME": columna}
+                    for columna in ("EMPLEADO", "NOMBRE", "ACTIVO")
+                ]
             if "[INKA]" in sql:
                 raise ErrorConexionSQL("Esquema inexistente", "servidor")
             return [
@@ -315,6 +328,30 @@ class PruebasRepositorioSQL(unittest.TestCase):
         self.assertEqual(resultado.empleados[0].empresa, "CALCA")
         self.assertEqual(len(resultado.errores), 1)
         self.assertEqual(resultado.errores[0]["empresa"], "INKA")
+
+    def test_consulta_adaptativa_omite_columnas_ausentes(self) -> None:
+        sql, parametros = queries.sql_empleados(
+            base_datos="EXACTUS",
+            esquema="CALCA",
+            cantidad=2,
+            columnas_disponibles={
+                "EMPLEADO": {"EMPLEADO", "NOMBRE", "ACTIVO"},
+            },
+        )
+        self.assertIn("'EMPLEADO' AS FUENTE", sql)
+        self.assertIn("E.[NOMBRE] AS NOMBRE", sql)
+        self.assertIn("NULL AS DEPARTAMENTO_CODIGO", sql)
+        self.assertNotIn("U_CORREO_CORP", sql)
+        self.assertNotIn("LEFT JOIN", sql)
+        self.assertEqual(parametros, 2)
+
+    def test_consulta_adaptativa_rechaza_nombre_insuficiente(self) -> None:
+        with self.assertRaises(queries.EsquemaInsuficiente):
+            queries.sql_empleados(
+                base_datos="EXACTUS",
+                esquema="CALCA",
+                columnas_disponibles={"EMPLEADO": {"EMPLEADO", "ACTIVO"}},
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -216,43 +216,14 @@ class ResolverAreas:
         )
 
     # ------------------------------------------------------------------
-    def resolver(self, usuario: Any) -> ResultadoResolucion:
-        texto = str(usuario or "").strip()
-        clave = normalizar_nombre(texto)
-        if not clave:
-            return ResultadoResolucion(
-                usuario=texto,
-                clave="",
-                caso=CASO_C,
-                estado=ESTADO_AREA_VACIA,
-                motivo="El registro no tiene un solicitante válido.",
-            )
+    def _resolver_empleado(
+        self,
+        texto: str,
+        clave: str,
+        empleado: Empleado,
+    ) -> ResultadoResolucion:
+        """Resuelve un empleado concreto, sin volver a elegir entre candidatos."""
 
-        candidatos = _empleado_unico(self._indice.get(clave, []))
-        if not candidatos:
-            return ResultadoResolucion(
-                usuario=texto,
-                clave=clave,
-                caso=CASO_C,
-                estado=ESTADO_SIN_COINCIDENCIAS,
-                motivo="No se encontró un empleado con ese nombre en la caché corporativa.",
-                sugerencias=self._sugerencias(clave),
-            )
-
-        if len(candidatos) > 1:
-            return ResultadoResolucion(
-                usuario=texto,
-                clave=clave,
-                caso=CASO_B,
-                estado=ESTADO_AMBIGUO,
-                candidatos=candidatos,
-                motivo=(
-                    f"Se encontraron {len(candidatos)} empleados con el mismo "
-                    "nombre. Seleccione la coincidencia correcta."
-                ),
-            )
-
-        empleado = candidatos[0]
         if not empleado.tiene_departamento:
             return ResultadoResolucion(
                 usuario=texto,
@@ -292,6 +263,65 @@ class ResolverAreas:
         )
         self._conflicto(resultado, empleado.departamento, texto)
         return resultado
+
+    def resolver(self, usuario: Any) -> ResultadoResolucion:
+        texto = str(usuario or "").strip()
+        clave = normalizar_nombre(texto)
+        if not clave:
+            return ResultadoResolucion(
+                usuario=texto,
+                clave="",
+                caso=CASO_C,
+                estado=ESTADO_AREA_VACIA,
+                motivo="El registro no tiene un solicitante válido.",
+            )
+
+        candidatos = _empleado_unico(self._indice.get(clave, []))
+        if not candidatos:
+            return ResultadoResolucion(
+                usuario=texto,
+                clave=clave,
+                caso=CASO_C,
+                estado=ESTADO_SIN_COINCIDENCIAS,
+                motivo="No se encontró un empleado con ese nombre en la caché corporativa.",
+                sugerencias=self._sugerencias(clave),
+            )
+
+        if len(candidatos) > 1:
+            return ResultadoResolucion(
+                usuario=texto,
+                clave=clave,
+                caso=CASO_B,
+                estado=ESTADO_AMBIGUO,
+                candidatos=candidatos,
+                motivo=(
+                    f"Se encontraron {len(candidatos)} empleados con el mismo "
+                    "nombre. Seleccione la coincidencia correcta."
+                ),
+            )
+
+        return self._resolver_empleado(texto, clave, candidatos[0])
+
+    def resolver_candidato(
+        self,
+        usuario: Any,
+        candidato: Empleado | dict[str, Any],
+    ) -> ResultadoResolucion:
+        """Resuelve el área usando únicamente el registro elegido por el usuario.
+
+        No consulta otros candidatos ni reutiliza departamentos de otras
+        empresas. La protección de asignaciones manuales del maestro se
+        mantiene mediante ``_conflicto``.
+        """
+
+        texto = str(usuario or "").strip()
+        clave = normalizar_nombre(texto)
+        empleado = (
+            candidato
+            if isinstance(candidato, Empleado)
+            else Empleado.desde_candidato(candidato)
+        )
+        return self._resolver_empleado(texto, clave or empleado.clave, empleado)
 
     def resolver_lote(
         self,
