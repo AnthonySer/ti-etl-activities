@@ -71,6 +71,7 @@ class ResultadoSincronizacion:
     departamentos_modificados_detalle: list[dict[str, str]] = field(
         default_factory=list
     )
+    alertas: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def cantidad_errores(self) -> int:
@@ -82,6 +83,7 @@ class ResultadoSincronizacion:
             "actualizados": self.actualizados,
             "departamentos_modificados": self.departamentos_modificados,
             "departamentos_modificados_detalle": self.departamentos_modificados_detalle,
+            "alertas": self.alertas,
             "sin_departamento": self.sin_departamento,
             "ambiguos": self.ambiguos,
             "errores": self.errores,
@@ -224,6 +226,52 @@ def _calcular_ambiguos(empleados: Sequence[Empleado]) -> int:
     return ambiguous
 
 
+def _alertas_contra_maestro(
+    detalles: Sequence[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Marca los cambios corporativos que difieren del área local asignada."""
+
+    if not detalles:
+        return []
+    try:
+        from core.asignaciones import cargar_maestro
+
+        maestro = cargar_maestro()
+    except Exception as exc:  # noqa: BLE001 - la alerta no bloquea la sincronización
+        LOGGER.warning("No se pudo comparar la sincronización con el maestro: %s", exc)
+        return []
+
+    alertas: list[dict[str, str]] = []
+    for item in detalles:
+        usuario = str(item.get("usuario") or "")
+        if not usuario:
+            continue
+        try:
+            area_local = maestro.buscar(usuario)
+        except Exception:  # noqa: BLE001
+            area_local = None
+        if not area_local:
+            continue
+        if normalizar_nombre(area_local) == normalizar_nombre(
+            item.get("nuevo") or ""
+        ):
+            continue
+        alertas.append(
+            {
+                "usuario": usuario,
+                "empresa": str(item.get("empresa") or ""),
+                "empleado": str(item.get("empleado") or ""),
+                "area_local": str(area_local),
+                "departamento_corporativo": str(item.get("nuevo") or ""),
+                "motivo": (
+                    "El departamento corporativo cambió y difiere del área "
+                    "asignada localmente. Revise antes de reasignar."
+                ),
+            }
+        )
+    return alertas
+
+
 class Sincronizador:
     """Orquesta la sincronización completa y el volcado a la caché."""
 
@@ -290,6 +338,7 @@ class Sincronizador:
         lista = list(actuales.values())
         xlsx, csv = guardar_cache(lista, crear_backup=bool(anteriores))
         ahora = datetime.now().astimezone().isoformat(timespec="seconds")
+        alertas = _alertas_contra_maestro(detalles_departamentos)
         resultado = ResultadoSincronizacion(
             nuevos=nuevos,
             actualizados=actualizados,
@@ -303,6 +352,7 @@ class Sincronizador:
             cache_xlsx=str(xlsx),
             cache_csv=str(csv),
             departamentos_modificados_detalle=detalles_departamentos,
+            alertas=alertas,
         )
         _escribir_metadatos(resultado)
         return resultado
@@ -346,6 +396,7 @@ def resumen_sincronizacion() -> dict[str, Any]:
         "actualizados": 0,
         "sin_departamento": 0,
         "ambiguos": 0,
+        "alertas": 0,
     }
     ruta = ruta_sincronizacion()
     if ruta.is_file():
@@ -364,6 +415,7 @@ def resumen_sincronizacion() -> dict[str, Any]:
                             datos.get("sin_departamento") or 0
                         ),
                         "ambiguos": int(datos.get("ambiguos") or 0),
+                        "alertas": len(datos.get("alertas") or []),
                     }
                 )
         except (OSError, json.JSONDecodeError, TypeError, ValueError):

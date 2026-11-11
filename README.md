@@ -32,6 +32,23 @@ Flujo completo desde consola (procesar + reporte + consolidar):
 python main.py input\consulta_septiembre_2026.xlsx --reporte --consolidar
 ```
 
+Modos de salida y pendientes:
+
+```powershell
+# Modo por defecto: una hoja "Consulta" con las 11 columnas
+python main.py input\consulta_septiembre_2026.xlsx
+
+# Archivo canónico + libro de cinco hojas a detalle
+python main.py input\consulta_septiembre_2026.xlsx --modo detalle
+
+# Si hay registros sin área, la generación se cancela con código 2.
+# Para generar un archivo parcial de forma explícita:
+python main.py input\consulta_septiembre_2026.xlsx --permitir-pendientes
+
+# Formato histórico (hoja "Tickets", sin sobrescritura automática)
+python main.py input\consulta_septiembre_2026.xlsx --modo legacy
+```
+
 Verificación del sistema:
 
 ```powershell
@@ -85,6 +102,12 @@ Reglas estructurales:
   detalle oficial.
 - **Áreas:** administración persistente de usuarios y áreas, búsqueda,
   sugerencias por similitud y detección de usuarios pendientes.
+- **Validación asistida:** ventana dedicada con KPIs, filtros, asignación manual,
+  consulta SQL Server (solo lectura), revisión de homónimos, validación masiva y
+  reanudación de revisiones guardadas.
+- **Generación controlada:** modo `normal` (una hoja) y `detalle` (cinco hojas),
+  con respaldo previo, reemplazo atómico, manifiesto JSON y bloqueo si quedan
+  registros sin área salvo confirmación explícita de generación parcial.
 - **Excel procesado:** 11 columnas, encabezados diferenciados, filtros, formatos,
   panel congelado y hojas auxiliares.
 - **Reimportación:** detección de filas nuevas, modificadas, sin cambios,
@@ -115,18 +138,27 @@ Reglas estructurales:
 script automatizador/
 ├─ main.py                     # GUI sin argumentos; flujo de consola con archivo
 ├─ interfaz.py                 # Interfaz Tkinter de 7 pestañas
+├─ ventana_validacion.py       # Validación de usuarios/áreas y generación
 ├─ auditar_sistema.py          # Auditoría técnica de integridad
 ├─ validar_septiembre.py       # Validación contra la referencia de septiembre 2026
 ├─ construir_maestro.py        # Herramienta avanzada: base inicial de áreas
 ├─ actualizar_maestro.py       # Herramienta avanzada: correcciones manuales de áreas
 ├─ config/
 │  ├─ configuracion.py         # Rutas, alias, umbrales y parámetros
+│  ├─ sqlserver.py             # Configuración de la conexión (cifrada)
 │  └─ logging_config.py        # Logs rotativos
+├─ database/
+│  ├─ connection.py            # Conexión ODBC de solo lectura
+│  ├─ repository.py            # Empleados por empresa y por lotes
+│  ├─ queries.py               # SQL parametrizado
+│  ├─ resolucion.py            # Casos A–E y conflictos
+│  └─ synchronizer.py          # Caché local y alertas de cambios
 ├─ core/
 │  ├─ esquema.py               # Esquema de 11 columnas, alias y huellas
 │  ├─ etl.py                   # Extracción y normalización
 │  ├─ procesador.py            # Orquestación del procesamiento y manifiesto
 │  ├─ procesado.py             # Escritura del Excel procesado
+│  ├─ revision.py              # Revisiones persistentes de validación
 │  ├─ solicitantes.py          # Detección y equivalencias asistidas de solicitantes
 │  ├─ maestro_tickets.py       # Maestro histórico y hoja CONTROL
 │  ├─ consolidacion_tickets.py # Procesado → maestro
@@ -142,7 +174,7 @@ script automatizador/
 ├─ output/                     # Excel procesados y manifiestos JSON
 ├─ reportes/                   # Reportes Excel y Markdown
 ├─ logs/                       # Log técnico rotativo
-└─ tests/test_sistema.py       # 65 pruebas automatizadas
+└─ tests/                      # 98 pruebas automatizadas
 ```
 
 ---
@@ -184,8 +216,9 @@ python -m unittest discover -s tests -v
 
 Cobertura actual: esquema, ETL, procesamiento, reimportación, consolidación,
 rollback, restauración de respaldos, reportes, servicios, integridad, validación
-de septiembre y arranque de la interfaz. Resultado de la última ejecución:
-**65 pruebas, 0 fallos**.
+de septiembre, arranque de la interfaz, conexión SQL de solo lectura, resolución
+de áreas, revisiones, modos de generación, respaldos y consola. Resultado de la
+última ejecución: **98 pruebas, 0 fallos (4 omitidas)**.
 
 Además, la validación del reporte Excel verifica la estructura real del libro con
 `openpyxl`, confirmando:

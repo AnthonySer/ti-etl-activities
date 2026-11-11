@@ -37,3 +37,7 @@ Thumbs.db
 desktop.ini
 config/configuracion_local.json
 config/configuracion_local.json.*
+
+# Configuracion de la conexion corporativa (contiene el secreto cifrado)
+config/sqlserver.json
+config/sqlserver.json.*

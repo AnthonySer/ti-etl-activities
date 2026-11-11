@@ -520,10 +520,11 @@ class VentanaConfiguracion(tk.Toplevel):
     def _actualizar_info_cache(self) -> None:
         resumen = resumen_sincronizacion()
         self._var_info_sync.set(
-            f"Empresas configuradas: {len(EMPRESAS)}\n"
+            f"Empresas configuradas: {len(self._sql.empresas_activas)}\n"
             f"Última sincronización: {resumen.get('fecha') or 'nunca'}\n"
             f"Empleados almacenados localmente: {resumen.get('total_empleados', 0)}\n"
-            f"Errores de sincronización: {resumen.get('errores', 0)}"
+            f"Errores de sincronización: {resumen.get('errores', 0)}\n"
+            f"Alertas por revisar: {resumen.get('alertas', 0)}"
         )
 
     def _colectar_sql(self):
@@ -707,6 +708,7 @@ class VentanaConfiguracion(tk.Toplevel):
                 f"Empleados sin departamento: {resultado.sin_departamento}\n"
                 f"Registros ambiguos: {resultado.ambiguos}\n"
                 f"Errores: {resultado.cantidad_errores}\n"
+                f"Alertas por conflicto con el maestro: {len(resultado.alertas)}\n"
                 f"Total almacenado: {resultado.total_empleados}\n"
                 f"Fecha: {resultado.fecha}",
             )
@@ -877,6 +879,8 @@ class AplicacionTk(tk.Tk):
         self._ruta_revision_actual: str = ""
         self._revision_actual: Any = None
         self._ventana_validacion: Any = None
+        self._ultima_copia_revision: str = ""
+        self._estadisticas_actuales: Any = None
         self._reimportacion = None
         self._reporte: dict[str, Any] | None = None
         self._cola: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -1514,7 +1518,7 @@ class AplicacionTk(tk.Tk):
         ).pack(anchor="w", pady=(0, 6))
 
         progreso = ttk.LabelFrame(
-            self._tab_procesar, text="2. Procesar y generar el Excel", padding=10
+            self._tab_procesar, text="2. Procesar, validar y generar el Excel", padding=10
         )
         progreso.pack(side="bottom", fill="x", pady=(10, 0))
         self._var_etapa = tk.StringVar(value="Esperando archivo validado.")
@@ -1528,17 +1532,34 @@ class AplicacionTk(tk.Tk):
         botones.pack(fill="x", pady=(8, 0))
         self._btn_procesar = ttk.Button(
             botones,
-            text="Procesar archivo",
+            text="Procesar y validar",
             style="Principal.TButton",
             command=self._procesar,
             state="disabled",
         )
         self._btn_procesar.pack(side="left")
+        self._btn_generar_normal = ttk.Button(
+            botones,
+            text="Generar Excel normal",
+            command=lambda: self._generar(cfg.MODO_NORMAL),
+            state="disabled",
+        )
+        self._btn_generar_normal.pack(side="left", padx=(8, 0))
+        self._btn_generar_detalle = ttk.Button(
+            botones,
+            text="Generar Excel a detalle",
+            command=lambda: self._generar(cfg.MODO_DETALLE),
+            state="disabled",
+        )
+        self._btn_generar_detalle.pack(side="left", padx=8)
         ttk.Button(
             botones, text="Abrir resultado", command=self._abrir_procesado
         ).pack(side="left", padx=8)
         ttk.Button(
             botones, text="Abrir carpeta de salida", command=lambda: _abrir(cfg.OUTPUT_DIR)
+        ).pack(side="left", padx=8)
+        ttk.Button(
+            botones, text="Reanudar revisión", command=self._reanudar_revision
         ).pack(side="left", padx=8)
 
         marco_tabla = ttk.LabelFrame(
@@ -1689,8 +1710,18 @@ class AplicacionTk(tk.Tk):
     def _fin_procesar(self, estadisticas: Any) -> None:
         self._barra.stop()
         self._barra.configure(mode="determinate", value=100)
+        self._estadisticas_actuales = estadisticas
         self._ultimo_procesado = estadisticas.archivo_salida
         self._ultimo_manifiesto = estadisticas.archivo_manifiesto or ""
+        self._ultima_copia_revision = getattr(
+            estadisticas, "ruta_copia_revision", ""
+        ) or ""
+        ruta_revision = getattr(estadisticas, "ruta_revision", "") or ""
+        self._ruta_revision_actual = ruta_revision
+        for nombre in ("_btn_generar_normal", "_btn_generar_detalle"):
+            boton = self.__dict__.get(nombre)
+            if boton is not None:
+                boton.configure(state="normal")
         svc_estado.actualizar_desde_estadisticas(
             estadisticas,
             operacion="PROCESAMIENTO",
@@ -1721,17 +1752,311 @@ class AplicacionTk(tk.Tk):
         self._limpiar_validacion_archivo(
             "Procesamiento finalizado. Seleccione otro Excel para continuar."
         )
+        if ruta_revision:
+            messagebox.showinfo(
+                "Validación requerida",
+                "Se detectaron registros que necesitan revisión:\n\n"
+                f"Pendientes de área: {estadisticas.registros_pendientes}\n"
+                f"Conflictos: {getattr(estadisticas, 'conflictos', 0)}\n\n"
+                "Se abrirá la ventana «Validación de Usuarios y Áreas».",
+            )
+            self._abrir_ventana_validacion(ruta_revision)
+            return
         messagebox.showinfo(
             "Procesamiento completado",
             "Se generó el Excel con las 11 columnas oficiales.\n\n"
             f"Archivo: {cfg.ruta_visible(Path(estadisticas.archivo_salida))}\n"
             f"Registros: {estadisticas.registros_totales}\n"
-            f"Pendientes de área: {estadisticas.registros_pendientes}",
+            "No hay pendientes de validación.\n\n"
+            "Puede generar el Excel normal o a detalle desde esta pestaña.",
         )
-        messagebox.showwarning(
-            "Advertencia",
-            "No generar los reportes definitivos antes de incorporar las correcciones manuales al maestro.",
+
+    # ------------------------------------------------------------------
+    # Validación de usuarios y áreas
+    # ------------------------------------------------------------------
+    def _abrir_ventana_validacion(self, ruta_revision: str) -> None:
+        from core import revision as svc_revision
+        from ventana_validacion import VentanaValidacion
+
+        try:
+            revision = svc_revision.Revision.cargar(ruta_revision)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(
+                "No se pudo abrir la revisión",
+                f"{exc}\n\nLa revisión quedó guardada en:\n{ruta_revision}",
+            )
+            return
+
+        ventana = self._ventana_validacion
+        if ventana is not None and ventana.winfo_exists():
+            ruta_abierta = getattr(getattr(ventana, "revision", None), "ruta", None)
+            if ruta_abierta is not None and str(ruta_abierta) == str(ruta_revision):
+                ventana.deiconify()
+                ventana.lift()
+                ventana.focus_force()
+                return
+            ventana.destroy()
+
+        self._revision_actual = revision
+        self._ruta_revision_actual = ruta_revision
+        try:
+            self._ventana_validacion = VentanaValidacion(
+                self,
+                revision,
+                self._maestro,
+                al_asignar=self._asignar_desde_validacion,
+                al_generar=lambda modo, permitir: self._generar_desde_validacion(
+                    modo, permitir, self._ventana_validacion
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("No se pudo abrir la ventana de validación")
+            messagebox.showerror("No se pudo abrir la validación", str(exc))
+
+    def _asignar_desde_validacion(
+        self, usuario: str, area: str, origen: str
+    ) -> None:
+        try:
+            with bloqueo("actualización de usuarios y áreas"):
+                svc_asignaciones.asignar_una(
+                    self._maestro,
+                    usuario,
+                    area,
+                    usuario_ejecutor=os.getenv("USERNAME", ""),
+                )
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(
+                "No se pudo guardar el área",
+                f"{usuario}: {exc}",
+            )
+            raise
+        self._refrescar_usuarios()
+        self._refrescar_pendientes()
+        self._refrescar_panel()
+        self._refrescar_auditoria()
+        self._var_info_usuario.set(
+            f"Asignación guardada: {usuario} → {area} ({origen})"
         )
+
+    def _reanudar_revision(self) -> None:
+        from core import revision as svc_revision
+
+        revisiones = svc_revision.listar_revisiones()
+        if not revisiones:
+            messagebox.showinfo(
+                "Sin revisiones",
+                "Todavía no hay revisiones guardadas para reanudar.",
+            )
+            return
+        seleccion = self._elegir_revision(revisiones)
+        if not seleccion:
+            return
+        try:
+            revision = svc_revision.Revision.cargar(seleccion["ruta"])
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("No se pudo abrir la revisión", str(exc))
+            return
+        entrada = Path(revision.archivo_original)
+        if entrada.is_file():
+            self._ruta_entrada_actual = str(entrada)
+            self._hoja_entrada_actual = None
+        else:
+            messagebox.showwarning(
+                "Archivo original no disponible",
+                "La revisión se abrirá, pero no se podrá regenerar el Excel "
+                f"porque el archivo original ya no existe:\n{entrada}",
+            )
+        if revision.archivo_procesado:
+            self._ultimo_procesado = revision.archivo_procesado
+        self._abrir_ventana_validacion(seleccion["ruta"])
+
+    def _elegir_revision(self, revisiones: list[dict[str, Any]]) -> dict[str, Any] | None:
+        ventana = tk.Toplevel(self)
+        ventana.title("Reanudar revisión")
+        ventana.geometry("720x380")
+        ventana.transient(self)
+        ventana.grab_set()
+        ventana.configure(bg=COLOR_FONDO)
+
+        ttk.Label(
+            ventana,
+            text="Seleccione la revisión que desea continuar",
+            style="Seccion.TLabel",
+        ).pack(anchor="w", padx=16, pady=(14, 8))
+        marco = ttk.Frame(ventana)
+        marco.pack(fill="both", expand=True, padx=16)
+        lista = tk.Listbox(marco, height=10)
+        barra = ttk.Scrollbar(marco, orient="vertical", command=lista.yview)
+        lista.configure(yscrollcommand=barra.set)
+        lista.pack(side="left", fill="both", expand=True)
+        barra.pack(side="right", fill="y")
+        for item in revisiones:
+            lista.insert(
+                tk.END,
+                f"{item['nombre_original'] or 'Sin nombre'} | "
+                f"{item['actualizado'] or 'sin fecha'} | "
+                f"por revisar: {item['por_revisar']}",
+            )
+        if revisiones:
+            lista.selection_set(0)
+
+        elegido: dict[str, Any] = {}
+
+        def confirmar() -> None:
+            seleccion = lista.curselection()
+            if not seleccion:
+                return
+            elegido.update(revisiones[seleccion[0]])
+            ventana.destroy()
+
+        botones = ttk.Frame(ventana)
+        botones.pack(fill="x", padx=16, pady=12)
+        ttk.Button(botones, text="Abrir", command=confirmar).pack(side="right")
+        ttk.Button(botones, text="Cancelar", command=ventana.destroy).pack(
+            side="right", padx=8
+        )
+        lista.bind("<Double-1>", lambda _e: confirmar())
+        self.wait_window(ventana)
+        return elegido or None
+
+    # ------------------------------------------------------------------
+    # Generación de Excel
+    # ------------------------------------------------------------------
+    def _generar(self, modo: str) -> None:
+        if self._ocupado:
+            return
+        ruta = self._ruta_entrada_actual or self._var_archivo.get().strip()
+        if not ruta or not Path(ruta).is_file():
+            messagebox.showwarning(
+                "Sin archivo",
+                "Procese y valide un archivo antes de generar el Excel.",
+            )
+            return
+        pendientes = int(
+            getattr(self._estadisticas_actuales, "registros_pendientes", 0) or 0
+        )
+        conflictos = int(
+            getattr(self._estadisticas_actuales, "conflictos", 0) or 0
+        )
+        if pendientes or conflictos:
+            if not messagebox.askyesno(
+                "Generar Excel con pendientes",
+                "No se puede generar el Excel completo:\n\n"
+                f"Registros sin área: {pendientes}\n"
+                f"Conflictos sin resolver: {conflictos}\n\n"
+                "¿Desea generar un Excel CON PENDIENTES? La generación quedará "
+                "registrada como parcial.",
+            ):
+                return
+            self._lanzar_generacion(modo, True)
+            return
+        self._lanzar_generacion(modo, False)
+
+    def _generar_desde_validacion(
+        self, modo: str, permitir_pendientes: bool, ventana: Any = None
+    ) -> bool:
+        if self._ocupado:
+            messagebox.showinfo(
+                "Operación en curso",
+                "Espere a que termine la operación actual.",
+            )
+            return False
+        if not self._ruta_entrada_actual:
+            messagebox.showwarning(
+                "Sin archivo original",
+                "No se puede regenerar el Excel porque esta revisión no tiene "
+                "un archivo original asociado.",
+            )
+            return False
+        self._lanzar_generacion(modo, permitir_pendientes, ventana)
+        return True
+
+    def _lanzar_generacion(
+        self, modo: str, permitir_pendientes: bool, ventana: Any = None
+    ) -> None:
+        ruta = Path(self._ruta_entrada_actual)
+        hoja = self._hoja_entrada_actual
+        nombre = "Excel a detalle" if modo == cfg.MODO_DETALLE else "Excel normal"
+        self._iniciar_ocupado(f"generando {nombre}…")
+        self._barra.configure(mode="indeterminate")
+        self._barra.start(12)
+        self._var_etapa.set(f"Generando {nombre}…")
+
+        def tarea() -> Any:
+            try:
+                with bloqueo("generación de Excel"):
+                    estadisticas = procesar_archivo(
+                        ruta,
+                        self._maestro,
+                        hoja=hoja,
+                        sobrescribir=True,
+                        formato_fecha=cfg.FORMATO_FECHA_PREFERIDO,
+                        usuario_ejecutor=os.getenv("USERNAME", ""),
+                        modo=modo,
+                        permitir_pendientes=permitir_pendientes,
+                        crear_revision=False,
+                    )
+                return True, estadisticas
+            except Exception as exc:  # noqa: BLE001
+                return False, exc
+
+        def fin(resultado: Any) -> None:
+            ok, carga = resultado
+            if not ok:
+                self._barra.stop()
+                self._barra.configure(mode="determinate", value=0)
+                self._terminar_ocupado()
+                messagebox.showerror("No se pudo generar el Excel", str(carga))
+                if ventana is not None and ventana.winfo_exists():
+                    ventana.generacion_terminada(False)
+                return
+            self._fin_generacion(carga, ventana)
+
+        self._ejecutar_hilo(tarea, fin, "generación de Excel")
+
+    def _fin_generacion(self, estadisticas: Any, ventana: Any = None) -> None:
+        self._barra.stop()
+        self._barra.configure(mode="determinate", value=100)
+        self._estadisticas_actuales = estadisticas
+        self._ultimo_procesado = estadisticas.archivo_salida
+        self._ultimo_manifiesto = estadisticas.archivo_manifiesto or ""
+        self._ultima_copia_revision = estadisticas.ruta_copia_revision or ""
+        self._ruta_revision_actual = estadisticas.ruta_revision or self._ruta_revision_actual
+        svc_estado.actualizar_desde_estadisticas(
+            estadisticas,
+            operacion="GENERACION",
+            mensajes=[
+                f"{estadisticas.archivo_entrada}: {estadisticas.modo_generacion}, "
+                f"{estadisticas.registros_pendientes} pendientes."
+            ],
+        )
+        self._var_etapa.set(
+            "Generación finalizada"
+            + (" (con pendientes)." if estadisticas.generacion_parcial else ".")
+        )
+        self._refrescar_panel()
+        self._refrescar_pendientes()
+        self._refrescar_auditoria()
+        self._terminar_ocupado()
+        lineas = [
+            f"Archivo: {cfg.ruta_visible(Path(estadisticas.archivo_salida))}",
+        ]
+        if estadisticas.archivo_detalle:
+            lineas.append(
+                f"Detalle: {cfg.ruta_visible(Path(estadisticas.archivo_detalle))}"
+            )
+        if estadisticas.ruta_copia_revision:
+            lineas.append(
+                "Copia de revisión: "
+                f"{cfg.ruta_visible(Path(estadisticas.ruta_copia_revision))}"
+            )
+        if estadisticas.generacion_parcial:
+            lineas.append(
+                f"Generación parcial: {estadisticas.registros_pendientes} registros sin área."
+            )
+        messagebox.showinfo("Excel generado", "\n".join(lineas))
+        if ventana is not None and ventana.winfo_exists():
+            ventana.generacion_terminada(True)
 
     def _abrir_procesado(self) -> None:
         ruta = self._ultimo_procesado or self._estado.ultimo_archivo_procesado
@@ -1741,7 +2066,15 @@ class AplicacionTk(tk.Tk):
             )
             return
         try:
-            _abrir(ruta)
+            copia = self._ultima_copia_revision
+            if copia and Path(copia).is_file():
+                destino = Path(copia)
+            else:
+                from core.procesado import copiar_revision
+
+                destino = copiar_revision(Path(ruta))
+                self._ultima_copia_revision = str(destino)
+            _abrir(destino)
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("No se pudo abrir", str(exc))
 

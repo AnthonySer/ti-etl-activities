@@ -64,9 +64,17 @@ def _imprimir_resumen(estadisticas: EstadisticasProcesamiento) -> None:
     print()
     print("Archivo generado   :")
     print(f"  {cfg.ruta_visible(Path(estadisticas.archivo_salida))}")
+    if estadisticas.archivo_detalle:
+        print("Excel a detalle    :")
+        print(f"  {cfg.ruta_visible(Path(estadisticas.archivo_detalle))}")
+    if estadisticas.ruta_copia_revision:
+        print("Copia de revisión  :")
+        print(f"  {cfg.ruta_visible(Path(estadisticas.ruta_copia_revision))}")
     if estadisticas.archivo_manifiesto:
         print("Manifiesto         :")
         print(f"  {cfg.ruta_visible(Path(estadisticas.archivo_manifiesto))}")
+    print(f"Modo de generación : {estadisticas.modo_generacion}")
+    print(f"Generación parcial : {'Sí' if estadisticas.generacion_parcial else 'No'}")
     print()
     print("El detalle conserva exactamente las 11 columnas oficiales.")
     print("Las observaciones, el resumen y el control están en hojas auxiliares.")
@@ -74,7 +82,16 @@ def _imprimir_resumen(estadisticas: EstadisticasProcesamiento) -> None:
 
 
 def _reporte_desde(archivo: Path) -> dict:
-    df = leer_excel(archivo, sheet_name=cfg.HOJA_DETALLE)
+    from core.archivos import listar_hojas
+
+    hojas = listar_hojas(archivo)
+    if cfg.HOJA_CONSULTA in hojas:
+        hoja = cfg.HOJA_CONSULTA
+    elif cfg.HOJA_DETALLE in hojas:
+        hoja = cfg.HOJA_DETALLE
+    else:
+        hoja = hojas[0] if hojas else cfg.HOJA_DETALLE
+    df = leer_excel(archivo, sheet_name=hoja)
     marca = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
     return generar_reporte(
         df,
@@ -86,16 +103,31 @@ def ejecutar_consola(args: argparse.Namespace) -> int:
     ruta_entrada = _resolver_entrada(args.archivo)
     maestro = cargar_maestro(args.maestro)
 
-    with bloqueo("procesamiento desde consola"):
-        estadisticas = procesar_archivo(
-            ruta_entrada,
-            maestro,
-            ruta_salida=args.salida,
-            hoja=args.hoja,
-            sobrescribir=args.sobrescribir,
-            formato_fecha=args.formato_fecha,
-            usuario_ejecutor=args.usuario or "",
-        )
+    try:
+        with bloqueo("procesamiento desde consola"):
+            estadisticas = procesar_archivo(
+                ruta_entrada,
+                maestro,
+                ruta_salida=args.salida,
+                hoja=args.hoja,
+                sobrescribir=args.sobrescribir,
+                formato_fecha=args.formato_fecha,
+                usuario_ejecutor=args.usuario or "",
+                modo=args.modo,
+                permitir_pendientes=args.permitir_pendientes,
+            )
+    except ErrorArchivo as exc:
+        if "Excel completo" in str(exc):
+            print()
+            print("GENERACIÓN CANCELADA", file=sys.stderr)
+            print(f"  {exc}", file=sys.stderr)
+            print(
+                "  Si desea un archivo parcial, repita el comando con "
+                "--permitir-pendientes.",
+                file=sys.stderr,
+            )
+            return 2
+        raise
 
     _imprimir_resumen(estadisticas)
     svc_estado.actualizar_desde_estadisticas(
@@ -149,6 +181,23 @@ def construir_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument(
+        "--modo",
+        choices=[cfg.MODO_NORMAL, cfg.MODO_DETALLE, cfg.MODO_LEGACY],
+        default=cfg.MODO_NORMAL,
+        help=(
+            "Formato de salida: normal (una hoja Consulta), detalle (cinco hojas "
+            "y actualización del canónico) o legacy (formato histórico)."
+        ),
+    )
+    parser.add_argument(
+        "--permitir-pendientes",
+        action="store_true",
+        help=(
+            "Permite generar el Excel aunque existan registros sin área validada. "
+            "Sin esta opción, la generación se cancela y se informa el problema."
+        ),
+    )
+    parser.add_argument(
         "archivo",
         nargs="?",
         help="Excel de entrada (.xlsx). Si se omite, se abre la interfaz.",
@@ -188,10 +237,10 @@ def construir_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configurar_consola()
     parser = construir_parser()
     args = parser.parse_args(argv)
 
-    configurar_consola()
     logger = configurar_logging()
     cfg.asegurar_directorios()
 
