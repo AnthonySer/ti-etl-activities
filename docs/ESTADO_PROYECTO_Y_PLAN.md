@@ -48,7 +48,7 @@ El último plan solicitado busca simplificar la salida normal a **una sola hoja 
 | Auditoría | Implementado: procesamientos, reimportaciones, consolidaciones, asignaciones, cambios y restauraciones. |
 | Interfaz gráfica | Implementado: 7 pestañas, panel principal con KPIs y acciones rápidas. |
 | Consola | Implementado: `python main.py <archivo>` con `--modo normal|detalle|legacy` y `--permitir-pendientes`. |
-| Pruebas | Implementado: 98 pruebas unitarias/integración aprobadas (4 omitidas). |
+| Pruebas | Implementado: 100 pruebas unitarias/integración aprobadas (4 omitidas). |
 
 ### 2.2 Estructura del proyecto
 
@@ -235,7 +235,7 @@ Los registros observados y pendientes **no se descartan**.
 
 ```powershell
 python -m unittest discover -s tests
-# Ran 98 tests ... OK (skipped=4)
+# Ran 100 tests ... OK (skipped=4)
 
 python validar_septiembre.py
 python auditar_sistema.py
@@ -260,7 +260,7 @@ python auditar_sistema.py
 
 ## 4. Plan implementado (2026-11-10)
 
-> Sección conservada como registro del diseño. **La implementación está realizada y verificada con 98 pruebas automatizadas.**
+> Sección conservada como registro del diseño. **La implementación está realizada y verificada con 100 pruebas automatizadas.**
 
 ### 4.1 Objetivo
 
@@ -453,6 +453,6 @@ Para no romper archivos existentes:
 4. Revisar la política de retención de respaldos con el área de operaciones.
 5. Programar la sincronización periódica de la caché de empleados.
 
-> **Estado:** implementado y verificado con 98 pruebas automatizadas (4 omitidas).
+> **Estado:** implementado y verificado con 100 pruebas automatizadas (4 omitidas).
 > Las verificaciones que dependen de EXACTUS y de una sesión gráfica real quedan
 > pendientes del entorno del usuario.

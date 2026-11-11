@@ -520,7 +520,7 @@ class VentanaConfiguracion(tk.Toplevel):
     def _actualizar_info_cache(self) -> None:
         resumen = resumen_sincronizacion()
         self._var_info_sync.set(
-            f"Empresas configuradas: {len(self._sql.empresas_activas)}\n"
+            f"Empresas configuradas: {len(self._sql.empresas_activas())}\n"
             f"Última sincronización: {resumen.get('fecha') or 'nunca'}\n"
             f"Empleados almacenados localmente: {resumen.get('total_empleados', 0)}\n"
             f"Errores de sincronización: {resumen.get('errores', 0)}\n"

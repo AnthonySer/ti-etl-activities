@@ -174,7 +174,7 @@ script automatizador/
 ├─ output/                     # Excel procesados y manifiestos JSON
 ├─ reportes/                   # Reportes Excel y Markdown
 ├─ logs/                       # Log técnico rotativo
-└─ tests/                      # 98 pruebas automatizadas
+└─ tests/                      # 100 pruebas automatizadas
 ```
 
 ---
@@ -218,7 +218,7 @@ Cobertura actual: esquema, ETL, procesamiento, reimportación, consolidación,
 rollback, restauración de respaldos, reportes, servicios, integridad, validación
 de septiembre, arranque de la interfaz, conexión SQL de solo lectura, resolución
 de áreas, revisiones, modos de generación, respaldos y consola. Resultado de la
-última ejecución: **98 pruebas, 0 fallos (4 omitidas)**.
+última ejecución: **100 pruebas, 0 fallos (4 omitidas)**.
 
 Además, la validación del reporte Excel verifica la estructura real del libro con
 `openpyxl`, confirmando:
