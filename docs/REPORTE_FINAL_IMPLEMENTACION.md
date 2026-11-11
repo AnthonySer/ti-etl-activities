@@ -49,7 +49,7 @@ los archivos de `input/` y sin ejecutar escrituras en la base corporativa.
 | `auditar_sistema.py` | Configuración UTF-8 de consola. |
 | `requirements.txt` | `pyodbc>=5.0`. |
 | `.gitignore` | Exclusión de `config/sqlserver.json` (contiene el secreto cifrado). |
-| `tests/test_sql_revision_generacion.py` | 33 pruebas nuevas de conexión, repositorio, resolución, revisiones, generación, respaldos, alertas, ventana y consola. |
+| `tests/test_sql_revision_generacion.py` | 35 pruebas nuevas de conexión, repositorio, resolución, revisiones, generación, respaldos, alertas, ventana y consola. |
 | `README.md`, `docs/MANUAL_USUARIO.md`, `docs/DOCUMENTACION_TECNICA.md`, `docs/ESTADO_PROYECTO_Y_PLAN.md` | Documentación actualizada al flujo implementado. |
 
 ---
@@ -65,7 +65,7 @@ python -m unittest discover -s tests
 Resultado real:
 
 ```text
-Ran 98 tests in 14.235s
+Ran 100 tests in 14.235s
 
 OK (skipped=4)
 ```
@@ -147,7 +147,7 @@ python main.py input\archivo.xlsx --modo legacy
 | Copia de revisión estable | Cumplido y probado |
 | Reanudación de revisiones | Cumplido y probado |
 | Compatibilidad con modo legado | Cumplido y probado |
-| Suite automatizada | 98 pruebas OK (4 omitidas) |
+| Suite automatizada | 100 pruebas OK (4 omitidas) |
 
 ---
 

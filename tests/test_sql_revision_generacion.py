@@ -670,6 +670,47 @@ class PruebasVentanaGeneracion(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Ventana de configuración: pestaña correcta y resumen de caché
+# ---------------------------------------------------------------------------
+class PruebasConfiguracionSQL(unittest.TestCase):
+    def test_info_cache_cuenta_empresas_activas(self) -> None:
+        from interfaz import VentanaConfiguracion
+
+        ventana = VentanaConfiguracion.__new__(VentanaConfiguracion)
+        ventana._sql = SimpleNamespace(
+            empresas_activas=mock.MagicMock(return_value=["CALCA", "INKA"])
+        )
+        ventana._var_info_sync = SimpleNamespace(set=mock.MagicMock())
+        with mock.patch("interfaz.resumen_sincronizacion", return_value={}):
+            ventana._actualizar_info_cache()
+        texto = ventana._var_info_sync.set.call_args[0][0]
+        self.assertIn("Empresas configuradas: 2", texto)
+
+    def test_ventana_sql_abre_en_la_pestana_de_conexion(self) -> None:
+        import tkinter as tk
+
+        from interfaz import VentanaConfiguracion
+
+        try:
+            raiz = tk.Tk()
+        except tk.TclError as exc:  # pragma: no cover - sin entorno gráfico
+            self.skipTest(f"Tk no disponible: {exc}")
+        raiz.withdraw()
+        try:
+            ventana = VentanaConfiguracion(raiz, seccion="sql")
+            ventana.withdraw()
+            try:
+                actual = ventana._pestanas.select()
+                self.assertEqual(
+                    ventana._pestanas.tab(actual, "text"), "Conexión SQL Server"
+                )
+            finally:
+                ventana.destroy()
+        finally:
+            raiz.destroy()
+
+
+# ---------------------------------------------------------------------------
 # Consola (CLI)
 # ---------------------------------------------------------------------------
 class PruebasCLI(BaseTemporal):

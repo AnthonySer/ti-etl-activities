@@ -433,7 +433,7 @@ Comando:
 python -m unittest discover -s tests -v
 ```
 
-Resultado de la última ejecución real: **98 pruebas, 0 fallos (4 omitidas)**.
+Resultado de la última ejecución real: **100 pruebas, 0 fallos (4 omitidas)**.
 
 Validación de referencia:
 
