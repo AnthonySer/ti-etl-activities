@@ -31,6 +31,7 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from config import configuracion as cfg
+from config.logging_config import configurar_consola
 from core.archivos import (
     COLUMNA_AREA,
     COLUMNA_USUARIO,
@@ -728,6 +729,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    configurar_consola()
     cfg.asegurar_directorios()
 
     ruta_maestro = cfg.resolver_ruta(args.maestro, cfg.MAESTRO_XLSX)

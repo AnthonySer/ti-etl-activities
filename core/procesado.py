@@ -462,26 +462,57 @@ def respaldar_si_existe(destino: Path, limite: int | None = None) -> Path | None
 
 
 def copiar_revision(destino: Path) -> Path:
-    """Copia el resultado a la carpeta de revisión junto con su manifiesto."""
+    """Copia el resultado a la carpeta de revisión junto con su manifiesto.
+
+    La copia tiene un nombre estable (``<stem>_revision.xlsx``) para que la
+    acción "Abrir resultado" siempre encuentre la última revisión generada.
+    La copia y su manifiesto se reemplazan de forma atómica.
+    """
 
     import shutil
 
     destino = Path(destino)
     carpeta = Path(cfg.REVISION_DIR)
     carpeta.mkdir(parents=True, exist_ok=True)
-    marca = datetime.now().strftime("%Y%m%d_%H%M%S")
-    copia = carpeta / f"{destino.stem}_revision_{marca}{destino.suffix}"
-    contador = 2
-    while copia.exists():
-        copia = carpeta / f"{destino.stem}_revision_{marca}_v{contador}{destino.suffix}"
-        contador += 1
-    shutil.copy2(destino, copia)
+    copia = carpeta / f"{destino.stem}_revision{destino.suffix}"
+    temporal = copia.with_name(f".{copia.stem}_tmp{copia.suffix}")
     manifiesto = destino.with_name(f"{destino.stem}{cfg.SUFIJO_MANIFIESTO}")
-    if manifiesto.is_file():
-        shutil.copy2(
-            manifiesto,
-            copia.with_name(f"{copia.stem}{cfg.SUFIJO_MANIFIESTO}"),
-        )
+    temporal_manifiesto = temporal.with_name(
+        f"{temporal.stem}{cfg.SUFIJO_MANIFIESTO}"
+    )
+    manifiesto_copia = copia.with_name(f"{copia.stem}{cfg.SUFIJO_MANIFIESTO}")
+
+    try:
+        shutil.copy2(destino, temporal)
+        if manifiesto.is_file():
+            shutil.copy2(manifiesto, temporal_manifiesto)
+        os.replace(temporal, copia)
+        if temporal_manifiesto.is_file():
+            os.replace(temporal_manifiesto, manifiesto_copia)
+    except PermissionError as exc:
+        for ruta in (temporal, temporal_manifiesto):
+            try:
+                ruta.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise ErrorArchivo(
+            f"No se pudo reemplazar la copia de revisión '{copia}'. "
+            "Verifique que el archivo no esté abierto en Excel."
+        ) from exc
+    finally:
+        for ruta in (temporal, temporal_manifiesto):
+            try:
+                ruta.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # Limpieza de copias antiguas con marca de tiempo del formato anterior.
+    for antigua in carpeta.glob(f"{destino.stem}_revision_*{destino.suffix}"):
+        try:
+            antigua.unlink()
+        except OSError:
+            LOGGER.debug("No se pudo eliminar la copia de revisión %s", antigua)
+
     return copia
 
 

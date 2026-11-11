@@ -87,6 +87,8 @@ class EstadisticasProcesamiento:
     ruta_copia_revision: str | None = None
     generacion_parcial: bool = False
     advertencias: int = 0
+    archivo_detalle: str | None = None
+    archivo_manifiesto_detalle: str | None = None
 
     def como_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -512,14 +514,23 @@ def procesar_archivo(
                 error.get("mensaje", ""),
             )
 
+    modos_canonicos = (cfg.MODO_NORMAL, cfg.MODO_DETALLE)
     if (
-        modo_efectivo == cfg.MODO_NORMAL
-        and registros_pendientes > 0
+        modo_efectivo in modos_canonicos
+        and (registros_pendientes > 0 or conflictos)
         and not permitir_pendientes
     ):
+        detalle = (
+            f"{registros_pendientes} registros sin área validada"
+            if registros_pendientes
+            else ""
+        )
+        if conflictos:
+            detalle = (
+                f"{detalle}; " if detalle else ""
+            ) + f"{len(conflictos)} conflictos de área sin resolver"
         raise ErrorArchivo(
-            "No se puede generar el Excel completo: existen "
-            f"{registros_pendientes} registros sin área validada. "
+            f"No se puede generar el Excel completo: {detalle}. "
             "Use 'Generar Excel con pendientes' o complete la validación."
         )
 
@@ -535,15 +546,26 @@ def procesar_archivo(
 
     conteos = df_procesado["_estado"].value_counts().to_dict() if len(df_procesado) else {}
 
-    if modo_efectivo == cfg.MODO_DETALLE and ruta_salida is None:
-        ruta_salida = (
-            cfg.OUTPUT_DIR / f"{ruta_entrada.stem}_procesado_detalle.xlsx"
-        )
-    destino = resolver_salida(ruta_entrada, ruta_salida, sobrescribir)
-    respaldo_destino = crear_respaldo or modo_efectivo in (
-        cfg.MODO_NORMAL,
-        cfg.MODO_DETALLE,
+    modos_canonicos = (cfg.MODO_NORMAL, cfg.MODO_DETALLE)
+    es_canonico = modo_efectivo in modos_canonicos
+    if es_canonico and ruta_salida is None:
+        ruta_salida = cfg.OUTPUT_DIR / f"{ruta_entrada.stem}_procesado.xlsx"
+    # El archivo canónico siempre se reemplaza de forma atómica y con respaldo
+    # previo; el modo legado conserva el comportamiento de no sobrescribir.
+    destino = resolver_salida(
+        ruta_entrada,
+        ruta_salida,
+        True if es_canonico else sobrescribir,
     )
+    respaldo_destino = crear_respaldo or es_canonico
+
+    ruta_detalle: Path | None = None
+    if modo_efectivo == cfg.MODO_DETALLE:
+        ruta_detalle = resolver_salida(
+            ruta_entrada,
+            destino.with_name(f"{destino.stem}_detalle{destino.suffix}"),
+            True,
+        )
 
     resumen = {
         "Total de registros": len(df_procesado),
@@ -578,6 +600,8 @@ def procesar_archivo(
         "Generación parcial": "Sí" if registros_pendientes > 0 else "No",
     }
 
+    # El detalle también actualiza el archivo canónico (hoja Consulta).
+    modo_canonico = cfg.MODO_NORMAL if modo_efectivo == cfg.MODO_DETALLE else modo_efectivo
     escribir_procesado(
         df_procesado.loc[:, list(COLUMNAS_OFICIALES)],
         destino,
@@ -585,11 +609,28 @@ def procesar_archivo(
         extras=extraccion.extras,
         resumen=resumen,
         meta=meta,
-        modo=modo_efectivo,
+        modo=modo_canonico,
         crear_respaldo=respaldo_destino,
     )
 
-    ruta_json = ruta_manifiesto(destino)
+    if ruta_detalle is not None:
+        try:
+            escribir_procesado(
+                df_procesado.loc[:, list(COLUMNAS_OFICIALES)],
+                ruta_detalle,
+                observaciones=observaciones,
+                extras=extraccion.extras,
+                resumen=resumen,
+                meta=meta,
+                modo=cfg.MODO_DETALLE,
+                crear_respaldo=True,
+            )
+        except ErrorArchivo as exc:
+            raise ErrorArchivo(
+                "Se generó el Excel canónico, pero falló el archivo a detalle: "
+                f"{exc}"
+            ) from exc
+
     datos_manifiesto: dict[str, Any] = {
         "version": 2,
         "id_ejecucion": ejecucion,
@@ -605,10 +646,10 @@ def procesar_archivo(
         "mapeo_columnas": extraccion.mapeo,
         "maestro_correspondencias": len(maestro),
         "fecha_archivo_ns": ruta_entrada.stat().st_mtime_ns,
-        "modo_generacion": modo_efectivo,
+        "modo_generacion": modo_canonico,
         "hoja_principal": (
             cfg.HOJA_CONSULTA
-            if modo_efectivo in (cfg.MODO_NORMAL, cfg.MODO_DETALLE)
+            if modo_canonico in (cfg.MODO_NORMAL, cfg.MODO_DETALLE)
             else cfg.HOJA_DETALLE
         ),
         "generacion_parcial": registros_pendientes > 0,
@@ -638,14 +679,35 @@ def procesar_archivo(
 
     archivo_manifiesto: str | None = None
     try:
-        escribir_json_atomico(datos_manifiesto, ruta_json)
-        archivo_manifiesto = str(ruta_json)
+        escribir_json_atomico(datos_manifiesto, ruta_manifiesto(destino))
+        archivo_manifiesto = str(ruta_manifiesto(destino))
     except ErrorArchivo as exc:
         LOGGER.error(
             "El archivo se generó, pero no se pudo escribir el manifiesto '%s': %s",
-            ruta_json,
+            ruta_manifiesto(destino),
             exc,
         )
+
+    archivo_manifiesto_detalle: str | None = None
+    if ruta_detalle is not None:
+        datos_detalle = dict(datos_manifiesto)
+        datos_detalle.update(
+            {
+                "archivo_salida": str(ruta_detalle.resolve()),
+                "modo_generacion": cfg.MODO_DETALLE,
+                "archivo_canonico": str(destino.resolve()),
+                "hoja_principal": cfg.HOJA_CONSULTA,
+            }
+        )
+        try:
+            escribir_json_atomico(datos_detalle, ruta_manifiesto(ruta_detalle))
+            archivo_manifiesto_detalle = str(ruta_manifiesto(ruta_detalle))
+        except ErrorArchivo as exc:
+            LOGGER.error(
+                "El detalle se generó, pero no se pudo escribir su manifiesto '%s': %s",
+                ruta_manifiesto(ruta_detalle),
+                exc,
+            )
 
     ruta_copia_revision: str | None = None
     if crear_copia_revision or modo_efectivo in (cfg.MODO_NORMAL, cfg.MODO_DETALLE):
@@ -694,6 +756,8 @@ def procesar_archivo(
         ruta_copia_revision=ruta_copia_revision,
         generacion_parcial=registros_pendientes > 0,
         advertencias=len(errores_sql),
+        archivo_detalle=str(ruta_detalle) if ruta_detalle is not None else None,
+        archivo_manifiesto_detalle=archivo_manifiesto_detalle,
     )
 
     if registrar_auditoria:

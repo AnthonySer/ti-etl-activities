@@ -85,6 +85,7 @@ class VentanaValidacion(tk.Toplevel):
         self._al_asignar = al_asignar
         self._al_generar = al_generar
         self._ocupado = False
+        self._generando = False
         self._iids: dict[str, dict[str, Any]] = {}
 
         self._var_busqueda = tk.StringVar()
@@ -694,6 +695,8 @@ class VentanaValidacion(tk.Toplevel):
         self._generar(True)
 
     def _generar(self, permitir_pendientes: bool) -> None:
+        if self._generando:
+            return
         modo = self._modo()
         self.revision.generacion = {
             "modo": modo,
@@ -708,12 +711,38 @@ class VentanaValidacion(tk.Toplevel):
                 "La revisión se guardó, pero no hay un generador conectado.",
             )
             return
+        self._generando = True
+        self._var_resumen.set("Generando el Excel…")
         try:
-            self._al_generar(modo, permitir_pendientes)
+            resultado = self._al_generar(modo, permitir_pendientes)
         except Exception as exc:  # noqa: BLE001
+            self._generando = False
             messagebox.showerror("No se pudo generar", str(exc))
             return
+        if resultado is True:
+            # Generación asíncrona en curso: la interfaz principal llamará a
+            # ``generacion_terminada`` cuando finalice.
+            return
+        self._generando = False
+        if resultado is False:
+            self._var_resumen.set(
+                "No se inició la generación. Corrija el problema indicado e "
+                "intente de nuevo."
+            )
+            return
+        # Compatibilidad con generadores síncronos previos.
         self.destroy()
+
+    def generacion_terminada(self, exito: bool) -> None:
+        """La interfaz principal informa el resultado de una generación."""
+
+        self._generando = False
+        if exito:
+            self.destroy()
+            return
+        self._var_resumen.set(
+            "La generación falló. La revisión sigue disponible para reintentar."
+        )
 
     def _cerrar(self) -> None:
         try:
