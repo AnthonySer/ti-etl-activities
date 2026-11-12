@@ -213,17 +213,25 @@ def guardar_cache(
     return xlsx, csv
 
 
-def _clave(item: Empleado) -> tuple[str, str]:
-    return (item.empresa, item.codigo)
+def _clave(item: Empleado) -> tuple[str, str, str]:
+    return (
+        item.empresa,
+        item.fuente or item.tabla or "EMPLEADO",
+        item.codigo,
+    )
 
 
 def _calcular_ambiguos(empleados: Sequence[Empleado]) -> int:
     indice = indice_por_nombre(empleados)
     ambiguous = 0
-    vistos: set[tuple[str, str]] = set()
+    vistos: set[tuple[str, str, str]] = set()
     for lista in indice.values():
         claves = {
-            (getattr(item, "empresa", ""), getattr(item, "codigo", ""))
+            (
+                getattr(item, "empresa", ""),
+                getattr(item, "fuente", "") or getattr(item, "tabla", ""),
+                getattr(item, "codigo", ""),
+            )
             for item in lista
         }
         if len(claves) > 1:

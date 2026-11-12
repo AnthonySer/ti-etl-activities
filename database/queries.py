@@ -84,28 +84,49 @@ def _limpiar(expresion: str) -> str:
     return f"{expresion} COLLATE Latin1_General_CI_AI"
 
 
-def _expresion_nombres(columnas: Iterable[str]) -> list[str]:
+def _limpiar_espacios(expresion: str) -> str:
+    """Reemplaza puntuación por espacios sin perder la separación de palabras.
+
+    Se usa para patrones ``LIKE``: el orden de los términos debe conservarse y
+    ``JUAN-CARLOS`` debe poder encontrarse como ``JUAN CARLOS``.
+    """
+
+    for caracter in ("'.'", "','", "'-'", "'_'", "'/'", "''''"):
+        expresion = f"REPLACE({expresion}, {caracter}, ' ')"
+    return f"{expresion} COLLATE Latin1_General_CI_AI"
+
+
+def _expresion_nombres(
+    columnas: Iterable[str],
+    *,
+    compacto: bool = True,
+) -> list[str]:
     """Expresión normalizada para comparar el nombre del solicitante.
 
     Se devuelve una sola expresión para que todas las empresas usen la misma
     cantidad de parámetros por lote. Si no existe ``NOMBRE`` se compone con las
     partes disponibles; si tampoco hay partes, la tabla es insuficiente.
+
+    ``compacto=True`` conserva la comparación exacta histórica (sin espacios);
+    ``compacto=False`` conserva los espacios para patrones ``LIKE`` ordenados.
     """
 
     disponibles = {str(columna).upper() for columna in columnas}
 
     if "NOMBRE" in disponibles:
-        return [_limpiar("UPPER(LTRIM(RTRIM(ISNULL(E.NOMBRE, ''))))")]
+        base = "UPPER(LTRIM(RTRIM(ISNULL(E.NOMBRE, ''))))"
+    else:
+        partes = [
+            columna
+            for columna in ("NOMBRE_PILA", "PRIMER_APELLIDO", "SEGUNDO_APELLIDO")
+            if columna in disponibles
+        ]
+        if not partes:
+            return []
+        concat = ", ' ', ".join(f"ISNULL(E.{columna}, '')" for columna in partes)
+        base = f"UPPER(LTRIM(RTRIM(CONCAT({concat}))))"
 
-    partes = [
-        columna
-        for columna in ("NOMBRE_PILA", "PRIMER_APELLIDO", "SEGUNDO_APELLIDO")
-        if columna in disponibles
-    ]
-    if not partes:
-        return []
-    concat = ", ' ', ".join(f"ISNULL(E.{columna}, '')" for columna in partes)
-    return [_limpiar(f"UPPER(LTRIM(RTRIM(CONCAT({concat}))))")]
+    return [_limpiar(base) if compacto else _limpiar_espacios(base)]
 
 
 def _columnas_por_tabla(
@@ -148,6 +169,7 @@ def sql_empleados(
     base_datos: str,
     esquema: str,
     cantidad: int = 0,
+    patrones: Iterable[str] | None = None,
     columnas_disponibles: Mapping[str, Iterable[str]] | Iterable[str] | None = None,
     columna_depto_empleado: str = "DEPARTAMENTO",
     columna_depto_catalogo: str = "DEPARTAMENTO",
@@ -160,10 +182,19 @@ def sql_empleados(
     Con ``cantidad`` > 0 se agrega un ``IN`` parametrizado por cada variante
     de nombre; el repositorio repite los valores en el mismo orden.
 
+    ``patrones`` permite una búsqueda ordenada: genera
+    ``(expresión LIKE ? ESCAPE '\\' OR ...)`` conservando el orden de los
+    términos. Los patrones siempre viajan como parámetros y sus comodines
+    deben venir escapados por ``core.busqueda_solicitantes``.
+
     Solo se incluyen columnas presentes en ``columnas_disponibles``. Si faltan
     los campos fundamentales se lanza ``EsquemaInsuficiente`` antes de ejecutar
     cualquier consulta.
     """
+
+    lista_patrones = list(patrones) if patrones is not None else None
+    if lista_patrones is not None and not lista_patrones:
+        raise ValueError("La búsqueda por patrones requiere al menos un patrón.")
 
     columnas = _columnas_por_tabla(columnas_disponibles)
     columnas_emp = columnas.get(TABLA_EMPLEADO, set())
@@ -172,7 +203,9 @@ def sql_empleados(
             "La tabla EMPLEADO no expone la columna fundamental EMPLEADO."
         )
 
-    expresiones_nombre = _expresion_nombres(columnas_emp)
+    expresiones_nombre = _expresion_nombres(
+        columnas_emp, compacto=lista_patrones is None
+    )
     if not expresiones_nombre:
         raise EsquemaInsuficiente(
             "La tabla EMPLEADO no tiene NOMBRE ni columnas de nombre "
@@ -288,6 +321,14 @@ def sql_empleados(
             f" ON P.[{validar_identificador(columna_puesto_catalogo)}]"
             f" = E.[{col_puesto_emp}]"
         )
+
+    if lista_patrones is not None:
+        clausulas = " OR ".join(
+            f"{expresiones_nombre[0]} LIKE ? ESCAPE '\\'"
+            for _ in lista_patrones
+        )
+        sql_texto += f" WHERE ({clausulas}) ORDER BY E.[EMPLEADO]"
+        return sql_texto, len(lista_patrones)
 
     if cantidad <= 0:
         return sql_texto + " ORDER BY E.[EMPLEADO]", 0

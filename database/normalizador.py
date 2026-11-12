@@ -87,20 +87,33 @@ def claves_desde_empleado(empleado: Any) -> set[str]:
     )
 
 
+def _huella_empleado(empleado: Any) -> tuple[str, str, str]:
+    return (
+        str(getattr(empleado, "empresa", "") or ""),
+        str(
+            getattr(empleado, "fuente", "")
+            or getattr(empleado, "tabla", "")
+            or ""
+        ),
+        str(getattr(empleado, "codigo", "") or ""),
+    )
+
+
 def indice_por_nombre(empleados: Iterable[Any]) -> dict[str, list[Any]]:
-    """Construye un índice ``clave de nombre -> empleados`` sin perder duplicados."""
+    """Construye un índice ``clave de nombre -> empleados`` sin perder duplicados.
+
+    La identidad lógica es ``(empresa, fuente, código)``: dos fuentes de la
+    misma empresa no se fusionan aunque compartan código y nombre.
+    """
 
     indice: dict[str, list[Any]] = {}
-    vistos: set[tuple[str, str]] = set()
+    vistos: set[tuple[str, str, str]] = set()
     for empleado in empleados:
-        empresa = str(getattr(empleado, "empresa", "") or "")
-        codigo = str(getattr(empleado, "codigo", "") or "")
-        huella = (empresa, codigo)
+        huella = _huella_empleado(empleado)
         for clave in claves_desde_empleado(empleado):
             lista = indice.setdefault(clave, [])
             if huella not in vistos or all(
-                (getattr(item, "empresa", ""), getattr(item, "codigo", "")) != huella
-                for item in lista
+                _huella_empleado(item) != huella for item in lista
             ):
                 lista.append(empleado)
                 vistos.add(huella)
