@@ -11,10 +11,13 @@ genera un error de SQL Server: simplemente omite los campos que no existen.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from config.sqlserver import EMPRESAS, ConfiguracionSQL
+from core import busqueda_solicitantes as busqueda
+from core import seguimiento_consultas as seguimiento
 from core.normalizador import limpiar_area
 from database import queries
 from database.connection import (
@@ -228,6 +231,10 @@ class ResultadoConsulta:
     empresas_sin_datos: list[str] = field(default_factory=list)
     empresas_sin_esquema: list[str] = field(default_factory=list)
     avisos: list[str] = field(default_factory=list)
+    por_consulta: dict[str, list[Empleado]] = field(default_factory=dict)
+    cancelada: bool = False
+    duracion_total: float = 0.0
+    eventos: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def empresas_con_error(self) -> list[str]:
@@ -240,6 +247,8 @@ class ResultadoConsulta:
             "errores": len(self.errores),
             "sin_datos": len(self.empresas_sin_datos),
             "sin_esquema": len(self.empresas_sin_esquema),
+            "cancelada": self.cancelada,
+            "duracion_total": round(self.duracion_total, 2),
         }
 
 
@@ -258,6 +267,26 @@ def _clasificar_error_consulta(exc: Exception, empresa: str) -> dict[str, str]:
     elif "INCORRECT SYNTAX" in texto or "SYNTAX" in texto or "102" in texto:
         categoria = "sintaxis"
     return {"empresa": empresa, "categoria": categoria, "mensaje": mensaje}
+
+
+def _avisar(al_progreso: Callable[[dict[str, Any]], None] | None, evento: dict[str, Any]) -> None:
+    """Entrega un evento a la ventana de seguimiento sin romper la consulta."""
+
+    if al_progreso is None:
+        return
+    try:
+        al_progreso(evento)
+    except Exception:  # noqa: BLE001 - la UI nunca debe tumbar la consulta
+        LOGGER.debug("No se pudo entregar el evento de seguimiento", exc_info=True)
+
+
+def _cancelado(debe_cancelar: Callable[[], bool] | None) -> bool:
+    if debe_cancelar is None:
+        return False
+    try:
+        return bool(debe_cancelar())
+    except Exception:  # noqa: BLE001
+        return False
 
 
 class RepositorioEmpleados:
@@ -318,154 +347,410 @@ class RepositorioEmpleados:
         empresas: Sequence[str],
         cantidad: int,
         parametros: list[Any] | None = None,
+        *,
+        consultas: Sequence[Mapping[str, Any]] | None = None,
+        al_progreso: Callable[[dict[str, Any]], None] | None = None,
+        debe_cancelar: Callable[[], bool] | None = None,
     ) -> ResultadoConsulta:
+        """Consulta cada empresa de forma aislada y emite progreso real.
+
+        El bucle exterior es la empresa para que la ventana de seguimiento
+        reciba un solo evento final por empresa, incluso cuando la búsqueda se
+        divide en varios lotes. Una empresa con error nunca se marca como
+        completada.
+        """
+
         resultado = ResultadoConsulta()
         vistos: set[tuple[str, str, str]] = set()
+        mapas: dict[str, set[tuple[str, str, str]]] = {}
+        inicio_total = time.perf_counter()
 
-        for empresa in empresas:
+        if consultas is None:
+            grupos: list[Sequence[Mapping[str, Any]] | None] = [None]
+        else:
+            lote = max(1, int(self.config.lote))
+            preparadas = list(consultas)
+            grupos = [
+                preparadas[inicio : inicio + lote]
+                for inicio in range(0, len(preparadas), lote)
+            ]
+
+        for indice_empresa, empresa in enumerate(empresas):
+            if _cancelado(debe_cancelar):
+                resultado.cancelada = True
+                for pendiente in empresas[indice_empresa:]:
+                    _avisar(
+                        al_progreso,
+                        seguimiento.nuevo_evento(
+                            pendiente,
+                            seguimiento.ESTADO_CANCELADA,
+                            detalle="La consulta fue cancelada antes de procesar esta empresa.",
+                        ),
+                    )
+                break
+
+            _avisar(
+                al_progreso,
+                seguimiento.nuevo_evento(
+                    empresa,
+                    seguimiento.ESTADO_CONSULTANDO,
+                    detalle="Obteniendo resultados…",
+                ),
+            )
+            inicio_empresa = time.perf_counter()
+
             try:
                 capacidad = self._leer_capacidades(empresa)
                 if capacidad.get("error") is not None:
-                    # Empresa ya falló en este repositorio: se informa sin
-                    # reintentar ni duplicar la advertencia en cada lote.
-                    resultado.errores.append(
-                        _clasificar_error_consulta(capacidad["error"], empresa)
+                    error = _clasificar_error_consulta(capacidad["error"], empresa)
+                    resultado.errores.append(error)
+                    _avisar(
+                        al_progreso,
+                        seguimiento.nuevo_evento(
+                            empresa,
+                            seguimiento.estado_desde_error(error["categoria"]),
+                            resultados=0,
+                            duracion=time.perf_counter() - inicio_empresa,
+                            detalle=error["mensaje"],
+                        ),
                     )
                     continue
+
                 columnas = capacidad["columnas"] if capacidad["disponible"] else None
 
                 if capacidad["disponible"]:
                     tabla_empleado = columnas.get(queries.TABLA_EMPLEADO, set())
                     if not tabla_empleado:
                         resultado.empresas_sin_esquema.append(empresa)
-                        resultado.errores.append(
-                            {
-                                "empresa": empresa,
-                                "categoria": "tabla",
-                                "mensaje": (
-                                    "No existe la tabla EMPLEADO en el esquema "
-                                    f"{empresa}."
-                                ),
-                            }
+                        error = {
+                            "empresa": empresa,
+                            "categoria": "tabla",
+                            "mensaje": (
+                                "No existe la tabla EMPLEADO en el esquema "
+                                f"{empresa}."
+                            ),
+                        }
+                        resultado.errores.append(error)
+                        _avisar(
+                            al_progreso,
+                            seguimiento.nuevo_evento(
+                                empresa,
+                                seguimiento.ESTADO_SIN_ESQUEMA,
+                                resultados=0,
+                                duracion=time.perf_counter() - inicio_empresa,
+                                detalle=error["mensaje"],
+                            ),
                         )
                         continue
                     if "EMPLEADO" not in tabla_empleado:
-                        resultado.errores.append(
-                            {
-                                "empresa": empresa,
-                                "categoria": "campos_insuficientes",
-                                "mensaje": (
-                                    "La tabla EMPLEADO no tiene la columna "
-                                    "fundamental EMPLEADO."
-                                ),
-                            }
+                        error = {
+                            "empresa": empresa,
+                            "categoria": "campos_insuficientes",
+                            "mensaje": (
+                                "La tabla EMPLEADO no tiene la columna "
+                                "fundamental EMPLEADO."
+                            ),
+                        }
+                        resultado.errores.append(error)
+                        resultado.empresas_sin_esquema.append(empresa)
+                        _avisar(
+                            al_progreso,
+                            seguimiento.nuevo_evento(
+                                empresa,
+                                seguimiento.ESTADO_SIN_ESQUEMA,
+                                resultados=0,
+                                duracion=time.perf_counter() - inicio_empresa,
+                                detalle=error["mensaje"],
+                            ),
                         )
                         continue
 
-                try:
-                    sql, _esperados = queries.sql_empleados(
-                        base_datos=self.config.base_datos,
-                        esquema=empresa,
-                        cantidad=cantidad,
-                        columnas_disponibles=columnas,
-                        columna_depto_empleado=self.config.columna_depto_empleado,
-                        columna_depto_catalogo=self.config.columna_depto_catalogo,
-                        columna_puesto_empleado=self.config.columna_puesto_empleado,
-                        columna_puesto_catalogo=self.config.columna_puesto_catalogo,
-                    )
-                except queries.EsquemaInsuficiente as exc:
-                    resultado.errores.append(
-                        {
+                filas_empresa = 0
+                esquema_insuficiente = False
+
+                for grupo in grupos:
+                    if _cancelado(debe_cancelar):
+                        resultado.cancelada = True
+                        break
+
+                    try:
+                        if consultas is None:
+                            sql, _esperados = queries.sql_empleados(
+                                base_datos=self.config.base_datos,
+                                esquema=empresa,
+                                cantidad=cantidad,
+                                columnas_disponibles=columnas,
+                                columna_depto_empleado=self.config.columna_depto_empleado,
+                                columna_depto_catalogo=self.config.columna_depto_catalogo,
+                                columna_puesto_empleado=self.config.columna_puesto_empleado,
+                                columna_puesto_catalogo=self.config.columna_puesto_catalogo,
+                            )
+                            parametros_grupo = parametros or []
+                        else:
+                            patrones = [str(item.get("patron") or "") for item in grupo or []]
+                            sql, _esperados = queries.sql_empleados(
+                                base_datos=self.config.base_datos,
+                                esquema=empresa,
+                                patrones=patrones,
+                                columnas_disponibles=columnas,
+                                columna_depto_empleado=self.config.columna_depto_empleado,
+                                columna_depto_catalogo=self.config.columna_depto_catalogo,
+                                columna_puesto_empleado=self.config.columna_puesto_empleado,
+                                columna_puesto_catalogo=self.config.columna_puesto_catalogo,
+                            )
+                            parametros_grupo = patrones
+                    except queries.EsquemaInsuficiente as exc:
+                        error = {
                             "empresa": empresa,
                             "categoria": "campos_insuficientes",
                             "mensaje": str(exc),
                         }
-                    )
+                        resultado.errores.append(error)
+                        resultado.empresas_sin_esquema.append(empresa)
+                        _avisar(
+                            al_progreso,
+                            seguimiento.nuevo_evento(
+                                empresa,
+                                seguimiento.ESTADO_SIN_ESQUEMA,
+                                resultados=0,
+                                duracion=time.perf_counter() - inicio_empresa,
+                                detalle=error["mensaje"],
+                            ),
+                        )
+                        esquema_insuficiente = True
+                        break
+
+                    with self._fabrica(self.config) as conexion:
+                        filas = self._ejecutor(conexion, sql, parametros_grupo)
+
+                    for fila in filas:
+                        fila = dict(fila)
+                        fila.setdefault("BASE_DATOS", self.config.base_datos)
+                        fila.setdefault("ESQUEMA", empresa)
+                        fila.setdefault("TABLA", queries.TABLA_EMPLEADO)
+                        empleado = Empleado.desde_fila(empresa, fila)
+                        huella = empleado.identificador
+                        if huella not in vistos:
+                            vistos.add(huella)
+                            resultado.empleados.append(empleado)
+                        filas_empresa += 1
+                        if consultas is not None:
+                            for consulta in grupo or []:
+                                clave = str(consulta.get("clave") or "")
+                                if not clave or not busqueda.coincide_consulta(
+                                    empleado, consulta
+                                ):
+                                    continue
+                                mapa = mapas.setdefault(clave, set())
+                                if huella in mapa:
+                                    continue
+                                mapa.add(huella)
+                                resultado.por_consulta.setdefault(clave, []).append(
+                                    empleado
+                                )
+
+                if esquema_insuficiente:
                     continue
 
-                with self._fabrica(self.config) as conexion:
-                    filas = self._ejecutor(conexion, sql, parametros or [])
-
-                for fila in filas:
-                    fila = dict(fila)
-                    fila.setdefault("BASE_DATOS", self.config.base_datos)
-                    fila.setdefault("ESQUEMA", empresa)
-                    fila.setdefault("TABLA", queries.TABLA_EMPLEADO)
-                    empleado = Empleado.desde_fila(empresa, fila)
-                    huella = empleado.identificador
-                    if huella in vistos:
-                        continue
-                    vistos.add(huella)
-                    resultado.empleados.append(empleado)
+                if resultado.cancelada:
+                    for pendiente in empresas[indice_empresa:]:
+                        _avisar(
+                            al_progreso,
+                            seguimiento.nuevo_evento(
+                                pendiente,
+                                seguimiento.ESTADO_CANCELADA,
+                                resultados=0 if pendiente == empresa else None,
+                                duracion=(
+                                    time.perf_counter() - inicio_empresa
+                                    if pendiente == empresa
+                                    else None
+                                ),
+                                detalle="La consulta fue cancelada por el usuario.",
+                            ),
+                        )
+                    break
 
                 resultado.empresas_consultadas.append(empresa)
-                if not filas:
+                if not filas_empresa:
                     resultado.empresas_sin_datos.append(empresa)
+                _avisar(
+                    al_progreso,
+                    seguimiento.nuevo_evento(
+                        empresa,
+                        (
+                            seguimiento.ESTADO_COMPLETADA
+                            if filas_empresa
+                            else seguimiento.ESTADO_SIN_RESULTADOS
+                        ),
+                        resultados=filas_empresa,
+                        duracion=time.perf_counter() - inicio_empresa,
+                        detalle=(
+                            f"{filas_empresa} resultado(s)."
+                            if filas_empresa
+                            else "La consulta no devolvió empleados."
+                        ),
+                    ),
+                )
             except ErrorConexionSQL as exc:
                 LOGGER.warning("Empresa %s: %s", empresa, exc)
-                resultado.errores.append(_clasificar_error_consulta(exc, empresa))
+                error = _clasificar_error_consulta(exc, empresa)
+                resultado.errores.append(error)
+                _avisar(
+                    al_progreso,
+                    seguimiento.nuevo_evento(
+                        empresa,
+                        seguimiento.estado_desde_error(error["categoria"]),
+                        resultados=0,
+                        duracion=time.perf_counter() - inicio_empresa,
+                        detalle=error["mensaje"],
+                    ),
+                )
             except Exception as exc:  # noqa: BLE001 - una empresa no bloquea el resto
                 LOGGER.exception("Error inesperado consultando la empresa %s", empresa)
-                resultado.errores.append(_clasificar_error_consulta(exc, empresa))
+                error = _clasificar_error_consulta(exc, empresa)
+                resultado.errores.append(error)
+                _avisar(
+                    al_progreso,
+                    seguimiento.nuevo_evento(
+                        empresa,
+                        seguimiento.estado_desde_error(error["categoria"]),
+                        resultados=0,
+                        duracion=time.perf_counter() - inicio_empresa,
+                        detalle=error["mensaje"],
+                    ),
+                )
+
+        resultado.duracion_total = time.perf_counter() - inicio_total
         return resultado
+
+    def buscar_por_consultas(
+        self,
+        consultas: Iterable[Mapping[str, Any] | str],
+        empresas: Sequence[str] | None = None,
+        *,
+        al_progreso: Callable[[dict[str, Any]], None] | None = None,
+        debe_cancelar: Callable[[], bool] | None = None,
+    ) -> ResultadoConsulta:
+        """Busca varios solicitantes conservando el mapeo a sus candidatos.
+
+        Cada consulta puede ser un ``PlanBusqueda.como_dict()`` o un nombre.
+        Los patrones viajan como parámetros y el repositorio conserva, para
+        cada solicitante, todos los empleados que cumplen su patrón. Así una
+        misma persona en varias empresas no se pierde ni se fusiona.
+        """
+
+        preparadas: list[dict[str, Any]] = []
+        vistos: set[str] = set()
+        for item in consultas:
+            if isinstance(item, Mapping):
+                datos = dict(item)
+            else:
+                datos = busqueda.plan_automatico(item).como_dict()
+
+            terminos = [
+                str(termino).strip().upper()
+                for termino in datos.get("terminos") or []
+                if str(termino).strip()
+            ]
+            patron = str(datos.get("patron") or busqueda.patron_like(terminos))
+            clave = str(
+                datos.get("clave")
+                or busqueda.normalizar_nombre(datos.get("solicitante"))
+                or " ".join(terminos)
+            )
+            if not patron or not clave:
+                continue
+            huella = clave.replace(" ", "")
+            if huella in vistos:
+                continue
+            vistos.add(huella)
+            preparadas.append(
+                {
+                    "solicitante": str(datos.get("solicitante") or clave),
+                    "clave": clave,
+                    "terminos": terminos,
+                    "patron": patron,
+                    "modo": str(datos.get("modo") or ""),
+                }
+            )
+
+        if not preparadas:
+            return ResultadoConsulta()
+
+        seleccion = self._empresas(empresas)
+        return self._consultar(
+            seleccion,
+            0,
+            [],
+            consultas=preparadas,
+            al_progreso=al_progreso,
+            debe_cancelar=debe_cancelar,
+        )
 
     def buscar_por_nombres(
         self,
         nombres: Iterable[str],
         empresas: Sequence[str] | None = None,
+        *,
+        al_progreso: Callable[[dict[str, Any]], None] | None = None,
+        debe_cancelar: Callable[[], bool] | None = None,
     ) -> ResultadoConsulta:
-        """Consulta por lotes los nombres solicitados (nunca uno por ticket)."""
+        """Consulta por lotes los nombres solicitados (nunca uno por ticket).
 
-        claves = []
+        Se reutiliza el plan de búsqueda de la interfaz: una palabra usa
+        ``%termino%``, dos palabras se invierten y tres o más conservan el
+        orden original. El procesamiento automático no abre ventanas.
+        """
+
+        consultas: list[dict[str, Any]] = []
         vistos: set[str] = set()
         for nombre in nombres:
-            clave = normalizar_nombre(nombre).replace(" ", "")
-            if clave and clave not in vistos:
-                vistos.add(clave)
-                claves.append(clave)
-        if not claves:
+            plan = busqueda.plan_automatico(nombre)
+            if not plan.terminos:
+                continue
+            huella = plan.clave.replace(" ", "")
+            if huella in vistos:
+                continue
+            vistos.add(huella)
+            consultas.append(plan.como_dict())
+
+        if not consultas:
             return ResultadoConsulta()
+        return self.buscar_por_consultas(
+            consultas,
+            empresas,
+            al_progreso=al_progreso,
+            debe_cancelar=debe_cancelar,
+        )
 
-        seleccion = self._empresas(empresas)
-        lote = max(1, int(self.config.lote))
-        acumulado = ResultadoConsulta()
-        huellas: set[tuple[str, str, str]] = set()
-        errores_vistos: set[tuple[str, str, str]] = set()
-        avisos_vistos: set[str] = set()
+    def buscar_por_patrones(
+        self,
+        patrones: Iterable[str],
+        empresas: Sequence[str] | None = None,
+        *,
+        al_progreso: Callable[[dict[str, Any]], None] | None = None,
+        debe_cancelar: Callable[[], bool] | None = None,
+    ) -> ResultadoConsulta:
+        """Compatibilidad: búsqueda directa por patrones ``LIKE`` ya escapados."""
 
-        for inicio in range(0, len(claves), lote):
-            grupo = claves[inicio : inicio + lote]
-            parcial = self._consultar(seleccion, len(grupo), list(grupo))
-            for empleado in parcial.empleados:
-                if empleado.identificador in huellas:
-                    continue
-                huellas.add(empleado.identificador)
-                acumulado.empleados.append(empleado)
-            for error in parcial.errores:
-                huella_error = (
-                    str(error.get("empresa") or ""),
-                    str(error.get("categoria") or ""),
-                    str(error.get("mensaje") or ""),
-                )
-                if huella_error in errores_vistos:
-                    continue
-                errores_vistos.add(huella_error)
-                acumulado.errores.append(error)
-            for aviso in parcial.avisos:
-                if aviso in avisos_vistos:
-                    continue
-                avisos_vistos.add(aviso)
-                acumulado.avisos.append(aviso)
-            for empresa in parcial.empresas_consultadas:
-                if empresa not in acumulado.empresas_consultadas:
-                    acumulado.empresas_consultadas.append(empresa)
-            for empresa in parcial.empresas_sin_datos:
-                if empresa not in acumulado.empresas_sin_datos:
-                    acumulado.empresas_sin_datos.append(empresa)
-            for empresa in parcial.empresas_sin_esquema:
-                if empresa not in acumulado.empresas_sin_esquema:
-                    acumulado.empresas_sin_esquema.append(empresa)
-        return acumulado
+        consultas = [
+            {
+                "solicitante": patron,
+                "clave": patron,
+                "terminos": [],
+                "patron": patron,
+            }
+            for patron in patrones
+            if str(patron or "").strip()
+        ]
+        if not consultas:
+            return ResultadoConsulta()
+        return self.buscar_por_consultas(
+            consultas,
+            empresas,
+            al_progreso=al_progreso,
+            debe_cancelar=debe_cancelar,
+        )
 
     def obtener_todos(
         self,

@@ -105,10 +105,14 @@ class ResultadoResolucion:
 
 
 def _empleado_unico(candidatos: Iterable[Empleado]) -> list[Empleado]:
-    vistos: set[tuple[str, str]] = set()
+    vistos: set[tuple[str, str, str]] = set()
     unicos: list[Empleado] = []
     for empleado in candidatos:
-        huella = (empleado.empresa, empleado.codigo)
+        huella = (
+            empleado.empresa,
+            empleado.fuente or empleado.tabla,
+            empleado.codigo,
+        )
         if huella in vistos:
             continue
         vistos.add(huella)
@@ -301,6 +305,55 @@ class ResolverAreas:
             )
 
         return self._resolver_empleado(texto, clave, candidatos[0])
+
+    def resolver_candidatos(
+        self,
+        usuario: Any,
+        candidatos: Iterable[Empleado],
+    ) -> ResultadoResolucion:
+        """Resuelve usando los candidatos devueltos por la consulta SQL.
+
+        Se conserva la identidad completa y no se consulta la caché para
+        completar o reemplazar candidatos. Si no hay resultados, el caso ``C``
+        mantiene el comportamiento actual.
+        """
+
+        texto = str(usuario or "").strip()
+        clave = normalizar_nombre(texto)
+        if not clave:
+            return ResultadoResolucion(
+                usuario=texto,
+                clave="",
+                caso=CASO_C,
+                estado=ESTADO_AREA_VACIA,
+                motivo="El registro no tiene un solicitante válido.",
+            )
+
+        unicos = _empleado_unico(candidatos)
+        if not unicos:
+            return ResultadoResolucion(
+                usuario=texto,
+                clave=clave,
+                caso=CASO_C,
+                estado=ESTADO_SIN_COINCIDENCIAS,
+                motivo="No se encontró un empleado con ese nombre en la consulta SQL.",
+                sugerencias=self._sugerencias(clave),
+            )
+
+        if len(unicos) > 1:
+            return ResultadoResolucion(
+                usuario=texto,
+                clave=clave,
+                caso=CASO_B,
+                estado=ESTADO_AMBIGUO,
+                candidatos=unicos,
+                motivo=(
+                    f"Se encontraron {len(unicos)} empleados con ese nombre o "
+                    "patrón. Seleccione la coincidencia correcta."
+                ),
+            )
+
+        return self._resolver_empleado(texto, clave, unicos[0])
 
     def resolver_candidato(
         self,

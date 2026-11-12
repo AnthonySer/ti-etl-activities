@@ -11,15 +11,20 @@ cerrar la ventana o la aplicación no hace perder el trabajo.
 from __future__ import annotations
 
 import logging
+import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any, Callable, Iterable
 
 from config import configuracion as cfg
 from config.sqlserver import cargar_configuracion
+from core import acciones_revision as acciones
+from core import busqueda_solicitantes as busqueda_core
 from core import procedencia
 from core import revision as svc_revision
+from core import seguimiento_consultas as seguimiento
 from core import seleccion_empleados as sel
 from core.maestro import Maestro
 from database.connection import controlador_disponible
@@ -290,15 +295,10 @@ class VentanaValidacion(tk.Toplevel):
         self._tabla.tag_configure("pendiente", background="#FEF3E2")
         self._tabla.tag_configure("conflicto", background="#F0ECFD")
 
-        self._tabla.bind("<Double-1>", lambda _e: self._ver_detalles())
-        self._menu = tk.Menu(self, tearoff=0)
-        self._menu.add_command(label="Consultar SQL", command=self._consultar_sql)
-        self._menu.add_command(label="Asignar área", command=self._asignar_area)
-        self._menu.add_command(
-            label="Revisar coincidencias", command=self._revisar_coincidencias
-        )
-        self._menu.add_command(label="Ver detalles", command=self._ver_detalles)
+        self._tabla.bind("<Double-1>", self._doble_clic)
+        self._tabla.bind("<Button-1>", self._clic_acciones)
         self._tabla.bind("<Button-3>", self._mostrar_menu)
+        self._menu = tk.Menu(self, tearoff=0)
 
     def _construir_acciones(self) -> None:
         marco = ttk.Frame(self)
@@ -408,7 +408,7 @@ class VentanaValidacion(tk.Toplevel):
                     _texto(registro.get("ticket")),
                     _texto(registro.get("area_actual")) or "—",
                     estado,
-                    "Consultar · Asignar · Revisar · Detalles",
+                    acciones.texto_acciones(registro),
                 ),
                 tags=(tag,),
             )
@@ -459,11 +459,70 @@ class VentanaValidacion(tk.Toplevel):
             return None
         return seleccionados[0]
 
+    def _doble_clic(self, evento) -> None:
+        if self._tabla.identify_column(evento.x) == "#7":
+            self._abrir_menu_fila(evento)
+            return
+        self._ver_detalles()
+
+    def _clic_acciones(self, evento) -> None:
+        """La celda «Acciones» abre el menú real de la fila seleccionada."""
+
+        if self._tabla.identify_column(evento.x) != "#7":
+            return
+        self._abrir_menu_fila(evento)
+
     def _mostrar_menu(self, evento) -> None:
+        self._abrir_menu_fila(evento)
+
+    def _abrir_menu_fila(self, evento) -> None:
         iid = self._tabla.identify_row(evento.y)
-        if iid:
-            self._tabla.selection_set(iid)
-            self._menu.tk_popup(evento.x_root, evento.y_root)
+        if not iid or iid not in self._iids:
+            return
+        self._tabla.selection_set(iid)
+        self._tabla.focus(iid)
+        self._mostrar_acciones(self._iids[iid], evento.x_root, evento.y_root)
+
+    def _mostrar_acciones(
+        self, registro: dict[str, Any], x: int, y: int
+    ) -> None:
+        menu = tk.Menu(self, tearoff=0)
+        disponibles = acciones.acciones_disponibles(registro)
+        if not disponibles:
+            menu.add_command(label="Sin acciones disponibles", state="disabled")
+        for accion in disponibles:
+            menu.add_command(
+                label=accion.etiqueta,
+                command=lambda a=accion: self._ejecutar_accion(
+                    a.identificador, registro
+                ),
+            )
+        self._menu = menu
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def _ejecutar_accion(
+        self, identificador: str, registro: dict[str, Any]
+    ) -> None:
+        """Despacha una acción del menú de fila a su operación real."""
+
+        if identificador == acciones.ACCION_CONSULTAR:
+            self._consultar_sql()
+        elif identificador == acciones.ACCION_ASIGNAR:
+            self._asignar_area()
+        elif identificador == acciones.ACCION_REVISAR:
+            self._abrir_seleccion(registro)
+        elif identificador == acciones.ACCION_DETALLES:
+            VentanaDetalleRegistro(self, registro)
+        elif identificador == acciones.ACCION_VALIDAR:
+            self._validar_registros([registro])
+        else:  # pragma: no cover - acción desconocida
+            messagebox.showinfo(
+                "Acción no disponible",
+                "Esta acción no tiene una operación asociada.",
+            )
 
     # ------------------------------------------------------------------
     # Acciones
@@ -491,7 +550,51 @@ class VentanaValidacion(tk.Toplevel):
             )
             return
 
-        nombres = [str(registro.get("usuario") or "") for registro in registros]
+        # Planificar antes de abrir la ventana de seguimiento. Para tres o más
+        # palabras se pide el orden; al cancelar, ese registro no consulta SQL.
+        planes: list[dict[str, Any]] = []
+        vistos: set[str] = set()
+        omitidos: list[str] = []
+        for registro in registros:
+            usuario = str(registro.get("usuario") or "").strip()
+            if not usuario:
+                continue
+            plan = busqueda_core.plan_busqueda(usuario)
+            if not plan.terminos:
+                omitidos.append(usuario)
+                continue
+            if plan.requiere_orden_manual:
+                orden = VentanaOrdenTerminos.pedir(self, plan)
+                if orden is None:
+                    omitidos.append(usuario)
+                    continue
+                try:
+                    plan = plan.con_orden(orden)
+                except ValueError as exc:
+                    messagebox.showwarning("Orden no válido", str(exc))
+                    omitidos.append(usuario)
+                    continue
+            if plan.clave in vistos:
+                continue
+            vistos.add(plan.clave)
+            planes.append(plan.como_dict())
+
+        if not planes:
+            self._var_resumen.set(
+                "No se ejecutó ninguna consulta: no hay términos válidos o se "
+                "canceló el ordenamiento."
+            )
+            return
+
+        ventana = VentanaSeguimientoConsulta(
+            self,
+            solicitantes=[str(plan.get("solicitante") or "") for plan in planes],
+            ordenes=[
+                busqueda_core.descripcion_orden(plan.get("terminos") or [])
+                for plan in planes
+            ],
+            empresas=config.empresas_activas(),
+        )
         self._ocupado = True
         self._var_resumen.set("Consultando SQL Server por lotes…")
 
@@ -499,26 +602,60 @@ class VentanaValidacion(tk.Toplevel):
             from database.repository import RepositorioEmpleados
 
             repositorio = RepositorioEmpleados(config)
-            consulta = repositorio.buscar_por_nombres(nombres)
+            consulta = repositorio.buscar_por_consultas(
+                planes,
+                al_progreso=ventana.encolar,
+                debe_cancelar=lambda: ventana.debe_cancelar,
+            )
             if consulta.empleados:
-                Sincronizador(
-                    config, repositorio=repositorio
-                ).actualizar_desde_busqueda(consulta.empleados)
+                try:
+                    Sincronizador(
+                        config, repositorio=repositorio
+                    ).actualizar_desde_busqueda(consulta.empleados)
+                except Exception:  # noqa: BLE001 - la caché no bloquea la consulta
+                    LOGGER.exception("No se pudo actualizar la caché tras la búsqueda")
             resolver = ResolverAreas(cargar_empleados(), maestro=self.maestro)
+            resoluciones = {}
+            for plan in planes:
+                clave = str(plan.get("clave") or "")
+                candidatos = consulta.por_consulta.get(clave) or []
+                # Se resuelve exclusivamente con lo devuelto por la consulta.
+                # Si no hay coincidencias, se informa; no se reutiliza una
+                # coincidencia antigua de la caché local.
+                resoluciones[clave] = resolver.resolver_candidatos(
+                    plan.get("solicitante"), candidatos
+                )
             return (
-                resolver.resolver_lote(nombres),
+                resoluciones,
                 list(consulta.errores),
                 list(consulta.empresas_sin_datos),
                 list(consulta.empresas_consultadas),
+                consulta.resumen(),
+                list(consulta.eventos),
+                consulta.cancelada,
+                omitidos,
             )
 
         def terminar(resultado):
             self._ocupado = False
             if isinstance(resultado, Exception):
+                try:
+                    ventana.finalizar(mensaje=f"Error: {resultado}")
+                except tk.TclError:
+                    pass
                 self._var_resumen.set(f"Error al consultar SQL: {resultado}")
                 messagebox.showerror("Error de consulta", str(resultado))
                 return
-            resoluciones, errores, sin_datos, consultadas = resultado
+            (
+                resoluciones,
+                errores,
+                sin_datos,
+                consultadas,
+                resumen,
+                _eventos,
+                cancelada,
+                omitidos_orden,
+            ) = resultado
             asignados = 0
             ambiguos: list[dict[str, Any]] = []
             for registro in registros:
@@ -583,7 +720,9 @@ class VentanaValidacion(tk.Toplevel):
             self.revision.guardar()
             self._refrescar()
             mensaje = (
-                f"Consulta completada en {len(consultadas)} empresa(s). "
+                f"Consulta {'cancelada' if cancelada else 'completada'} en "
+                f"{len(consultadas)} empresa(s). "
+                f"Empleados encontrados: {resumen.get('empleados', 0)}. "
                 f"Áreas asignadas: {asignados}. "
                 f"Requieren selección manual: {len(ambiguos)}."
             )
@@ -598,11 +737,24 @@ class VentanaValidacion(tk.Toplevel):
                 mensaje += (
                     f" Empresas con error: {len(errores)}. {detalle}"
                 )
+            if omitidos_orden:
+                mensaje += (
+                    " Sin consultar por orden cancelado: "
+                    + ", ".join(omitidos_orden)
+                    + "."
+                )
+            if cancelada:
+                mensaje += " Se conservaron los resultados válidos obtenidos."
             self._var_resumen.set(mensaje)
+            try:
+                if ventana.winfo_exists():
+                    ventana.finalizar(resumen=resumen, mensaje=mensaje)
+            except tk.TclError:
+                pass
             # La subventana se abre desde el hilo principal, nunca desde el
             # trabajador. Si hay una sola coincidencia ambigua, se ofrece de
             # inmediato la selección manual.
-            if len(registros) == 1 and len(ambiguos) == 1:
+            if not cancelada and len(registros) == 1 and len(ambiguos) == 1:
                 self.after(10, lambda: self._abrir_seleccion(ambiguos[0]))
 
         self._ejecutar(tarea, terminar)
@@ -725,19 +877,55 @@ class VentanaValidacion(tk.Toplevel):
         if not registros:
             messagebox.showinfo("Sin selección", "Seleccione al menos una fila.")
             return
+        self._validar_registros(registros)
+
+    def _validar_registros(self, registros: Iterable[dict[str, Any]]) -> None:
+        registros = list(registros)
+        resumen = acciones.resumen_validacion(registros)
+        if not resumen["validables"]:
+            if resumen.get("ya_validados"):
+                messagebox.showinfo(
+                    "Ya validados",
+                    f"{resumen['ya_validados']} registro(s) ya están validados. "
+                    "No se repitió ninguna operación.",
+                )
+            else:
+                messagebox.showwarning(
+                    "Sin área para validar",
+                    "Los registros seleccionados no tienen área actual. Asigne "
+                    "un área o consulte SQL antes de validarlos.",
+                )
+            return
+        if resumen["omitidos"] and not messagebox.askyesno(
+            "Validación parcial",
+            f"{resumen['omitidos']} de {resumen['total']} registros no tienen "
+            "área y no se validarán.\n\n¿Desea validar los "
+            f"{resumen['validables']} registros que sí tienen área?",
+        ):
+            return
         validados = 0
         for registro in registros:
-            if str(registro.get("area_actual") or "").strip():
-                self.revision.actualizar(
-                    registro.get("usuario"),
-                    estado=ESTADO_VALIDADO,
-                    validado=True,
-                    accion="validacion_manual",
-                )
-                validados += 1
+            if not acciones.accion_disponible(
+                acciones.ACCION_VALIDAR, registro
+            ):
+                continue
+            self.revision.actualizar(
+                registro.get("usuario"),
+                estado=ESTADO_VALIDADO,
+                validado=True,
+                accion="validacion_manual",
+            )
+            validados += 1
+        if not validados:
+            return
         self.revision.guardar()
         self._refrescar()
-        self._var_resumen.set(f"Registros marcados como validados: {validados}")
+        mensaje = f"Registros marcados como validados: {validados}"
+        if resumen["omitidos"]:
+            mensaje += f". Omitidos sin área: {resumen['omitidos']}"
+        if resumen.get("ya_validados"):
+            mensaje += f". Ya validados: {resumen['ya_validados']}"
+        self._var_resumen.set(mensaje)
 
     def _ver_detalles(self) -> None:
         registro = self._un_registro()
@@ -928,6 +1116,617 @@ class VentanaAsignarArea(tk.Toplevel):
             messagebox.showwarning("Área vacía", "Indique un área válida.")
             return
         self._al_guardar(area)
+        self.destroy()
+
+
+class VentanaOrdenTerminos(tk.Toplevel):
+    """Organiza el orden de búsqueda cuando el solicitante tiene 3+ palabras.
+
+    No modifica el valor del Excel: solo produce el orden de términos que se
+    usará para construir el patrón ``LIKE`` de la consulta.
+    """
+
+    def __init__(self, padre: tk.Misc, plan: busqueda_core.PlanBusqueda) -> None:
+        super().__init__(padre)
+        self.title("Ordenar términos de búsqueda")
+        self.geometry("660x510")
+        self.minsize(560, 470)
+        self.configure(bg=FONDO)
+        self.transient(padre)
+        self.grab_set()
+
+        self._plan = plan
+        self._terminos = list(plan.terminos)
+        self._originales = list(plan.terminos_originales or plan.terminos)
+        self._resultado: list[str] | None = None
+        self._var_patron = tk.StringVar()
+
+        ttk.Label(
+            self, text="Orden de búsqueda", style="Seccion.TLabel"
+        ).pack(anchor="w", padx=18, pady=(14, 4))
+        ttk.Label(
+            self,
+            text=f"Solicitante original: {plan.solicitante or '—'}",
+            style="Subtitulo.TLabel",
+            wraplength=610,
+            justify="left",
+        ).pack(anchor="w", padx=18)
+        ttk.Label(
+            self,
+            text=(
+                "Se detectaron tres o más palabras. Ordene los términos con los "
+                "botones ↑ / ↓ o con doble clic en la lista."
+            ),
+            style="Subtitulo.TLabel",
+            wraplength=610,
+            justify="left",
+        ).pack(anchor="w", padx=18, pady=(2, 8))
+
+        marco_lista = ttk.Frame(self)
+        marco_lista.pack(fill="both", expand=True, padx=18, pady=(0, 8))
+        self._lista = tk.Listbox(
+            marco_lista,
+            height=6,
+            exportselection=False,
+            bg=SUPERFICIE,
+            fg=TEXTO,
+            selectbackground=AZUL_SUAVE,
+            selectforeground=TEXTO,
+            font=(ui_tema.FUENTE, 11),
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=BORDE,
+            activestyle="none",
+        )
+        barra = ttk.Scrollbar(
+            marco_lista, orient="vertical", command=self._lista.yview
+        )
+        self._lista.configure(yscrollcommand=barra.set)
+        self._lista.pack(side="left", fill="both", expand=True)
+        barra.pack(side="right", fill="y")
+        self._lista.bind("<Double-1>", self._subir)
+
+        controles = ttk.Frame(self)
+        controles.pack(fill="x", padx=18, pady=(0, 8))
+        ttk.Button(controles, text="↑ Subir", command=self._subir).pack(
+            side="left"
+        )
+        ttk.Button(controles, text="↓ Bajar", command=self._bajar).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Button(
+            controles,
+            text="Restaurar orden original",
+            command=self._restaurar,
+        ).pack(side="left", padx=(6, 0))
+
+        vista = ttk.LabelFrame(
+            self, text="Vista previa del patrón SQL", padding=8
+        )
+        vista.pack(fill="x", padx=18, pady=(0, 8))
+        ttk.Label(
+            vista,
+            textvariable=self._var_patron,
+            font=(ui_tema.FUENTE_MONO, 11, "bold"),
+            foreground=AZUL_PRINCIPAL,
+            wraplength=590,
+            justify="left",
+        ).pack(anchor="w", padx=6, pady=4)
+        ttk.Label(
+            vista,
+            text=(
+                "Los términos se envían como parámetro y los comodines se "
+                "escapan. El valor del solicitante en el Excel no se modifica."
+            ),
+            style="TarjetaSecundaria.TLabel",
+            wraplength=590,
+            justify="left",
+        ).pack(anchor="w", padx=6)
+
+        botones = ttk.Frame(self)
+        botones.pack(fill="x", padx=18, pady=(0, 14))
+        ttk.Button(
+            botones,
+            text="CONFIRMAR BÚSQUEDA",
+            style="Principal.TButton",
+            command=self._confirmar,
+        ).pack(side="right")
+        ttk.Button(botones, text="CANCELAR", command=self._cancelar).pack(
+            side="right", padx=(0, 8)
+        )
+
+        self._actualizar()
+        self.protocol("WM_DELETE_WINDOW", self._cancelar)
+        self.bind("<Escape>", lambda _e: self._cancelar())
+        self._lista.focus_set()
+
+    @classmethod
+    def pedir(
+        cls, padre: tk.Misc, plan: busqueda_core.PlanBusqueda
+    ) -> list[str] | None:
+        """Muestra el organizador y devuelve el orden confirmado o ``None``."""
+
+        try:
+            ventana = cls(padre, plan)
+        except tk.TclError:  # pragma: no cover - sin entorno gráfico
+            return None
+        try:
+            padre.wait_window(ventana)
+        except tk.TclError:  # pragma: no cover
+            return None
+        return ventana._resultado
+
+    # ------------------------------------------------------------------
+    def _seleccion(self) -> int | None:
+        seleccion = self._lista.curselection()
+        return int(seleccion[0]) if seleccion else None
+
+    def _mover(self, origen: int, destino: int) -> None:
+        if destino < 0 or destino >= len(self._terminos):
+            return
+        self._terminos[origen], self._terminos[destino] = (
+            self._terminos[destino],
+            self._terminos[origen],
+        )
+        self._actualizar()
+        self._lista.selection_clear(0, "end")
+        self._lista.selection_set(destino)
+        self._lista.activate(destino)
+
+    def _subir(self, _evento=None) -> None:
+        indice = self._seleccion()
+        if indice is None:
+            if self._terminos:
+                self._lista.selection_set(0)
+            return
+        self._mover(indice, indice - 1)
+
+    def _bajar(self) -> None:
+        indice = self._seleccion()
+        if indice is None:
+            return
+        self._mover(indice, indice + 1)
+
+    def _restaurar(self) -> None:
+        self._terminos = list(self._originales)
+        self._actualizar()
+
+    def _actualizar(self) -> None:
+        self._lista.delete(0, "end")
+        for termino in self._terminos:
+            self._lista.insert("end", termino)
+        self._var_patron.set(busqueda_core.patron_visible(self._terminos))
+
+    def _confirmar(self) -> None:
+        self._resultado = list(self._terminos)
+        self.destroy()
+
+    def _cancelar(self) -> None:
+        self._resultado = None
+        self.destroy()
+
+
+class VentanaSeguimientoConsulta(tk.Toplevel):
+    """Seguimiento visual y no bloqueante de la consulta SQL por empresa.
+
+    El repositorio entrega eventos desde un hilo trabajador mediante
+    ``encolar``. Este método solo escribe en una cola segura; los widgets se
+    actualizan exclusivamente en el hilo principal con ``after``.
+    """
+
+    _COLUMNAS = (
+        ("empresa", "Empresa", 120),
+        ("estado", "Estado", 175),
+        ("resultados", "Resultados", 95),
+        ("tiempo", "Tiempo", 100),
+        ("detalle", "Detalle", 380),
+    )
+
+    _TAG_POR_ESTADO = {
+        seguimiento.ESTADO_PENDIENTE: "pendiente",
+        seguimiento.ESTADO_CONSULTANDO: "consultando",
+        seguimiento.ESTADO_COMPLETADA: "completada",
+        seguimiento.ESTADO_SIN_RESULTADOS: "sin_resultados",
+        seguimiento.ESTADO_SIN_ESQUEMA: "sin_esquema",
+        seguimiento.ESTADO_ERROR_CONEXION: "error",
+        seguimiento.ESTADO_ERROR_PERMISOS: "error",
+        seguimiento.ESTADO_ERROR_CONSULTA: "error",
+        seguimiento.ESTADO_CANCELADA: "cancelada",
+    }
+
+    _ESTILO_ESTADO = {
+        seguimiento.ESTADO_COMPLETADA: "success",
+        seguimiento.ESTADO_SIN_RESULTADOS: "info",
+        seguimiento.ESTADO_SIN_ESQUEMA: "warning",
+        seguimiento.ESTADO_ERROR_CONEXION: "danger",
+        seguimiento.ESTADO_ERROR_PERMISOS: "danger",
+        seguimiento.ESTADO_ERROR_CONSULTA: "danger",
+        seguimiento.ESTADO_CANCELADA: "warning",
+    }
+
+    def __init__(
+        self,
+        padre: tk.Misc,
+        *,
+        solicitantes: Iterable[str],
+        ordenes: Iterable[str],
+        empresas: Iterable[str],
+    ) -> None:
+        super().__init__(padre)
+        self.title("Seguimiento de consultas SQL")
+        self.geometry("1040x660")
+        self.minsize(820, 520)
+        self.configure(bg=FONDO)
+        self.transient(padre)
+
+        self._empresas = list(
+            dict.fromkeys(
+                str(empresa).strip()
+                for empresa in empresas
+                if str(empresa or "").strip()
+            )
+        )
+        self._resumen = seguimiento.ResumenSeguimiento(
+            total_empresas=len(self._empresas)
+        )
+        self._cola: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._iids: dict[str, str] = {}
+        self._corriendo = True
+        self._cancelar_solicitado = False
+        self._after_id: str | None = None
+
+        lista_solicitantes = [
+            str(item).strip() for item in solicitantes if str(item or "").strip()
+        ]
+        lista_ordenes = [str(item).strip() for item in ordenes if str(item or "").strip()]
+        self._var_solicitantes = tk.StringVar(
+            value=self._resumir_lista(lista_solicitantes, "Solicitantes")
+        )
+        self._var_orden = tk.StringVar(value=self._resumir_lista(lista_ordenes, "Orden"))
+        self._var_estado = tk.StringVar(value="Consultando empresas…")
+        self._var_total = tk.StringVar(value=str(len(self._empresas)))
+        self._var_procesadas = tk.StringVar(value="0")
+        self._var_pendientes = tk.StringVar(value=str(len(self._empresas)))
+        self._var_porcentaje = tk.StringVar(value="0%")
+        self._var_resumen = tk.StringVar(value="Preparando la consulta…")
+
+        self._construir_cabecera()
+        self._construir_progreso()
+        self._construir_tabla()
+        self._construir_resumen()
+        self._construir_botones()
+
+        self.protocol("WM_DELETE_WINDOW", self._cerrar)
+        self.bind("<Escape>", lambda _e: self._cerrar())
+        self._after_id = self.after(120, self._procesar_cola)
+
+    # ------------------------------------------------------------------
+    # Construcción visual
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _resumir_lista(items: list[str], etiqueta: str) -> str:
+        if not items:
+            return f"{etiqueta}: —"
+        if len(items) <= 3:
+            return f"{etiqueta}: " + " · ".join(items)
+        return f"{etiqueta}: " + " · ".join(items[:3]) + f" (+{len(items) - 3})"
+
+    def _construir_cabecera(self) -> None:
+        encabezado = EncabezadoDegradado(self, alto=88)
+        encabezado.pack(fill="x")
+        contenido = encabezado.contenido
+        contenido.configure(bg=AZUL_MARINO)
+        ttk.Label(
+            contenido,
+            text="SEGUIMIENTO DE CONSULTAS SQL",
+            style="Cabecera.TLabel",
+        ).pack(anchor="w", padx=18, pady=(12, 0))
+        ttk.Label(
+            contenido,
+            textvariable=self._var_solicitantes,
+            style="CabeceraSecundaria.TLabel",
+            wraplength=980,
+            justify="left",
+        ).pack(anchor="w", padx=18)
+        ttk.Label(
+            contenido,
+            textvariable=self._var_orden,
+            style="CabeceraSecundaria.TLabel",
+            wraplength=980,
+            justify="left",
+        ).pack(anchor="w", padx=18, pady=(0, 10))
+
+    def _construir_progreso(self) -> None:
+        marco = ttk.Frame(self)
+        marco.pack(fill="x", padx=18, pady=(12, 4))
+
+        fila_estado = ttk.Frame(marco)
+        fila_estado.pack(fill="x")
+        ttk.Label(
+            fila_estado, textvariable=self._var_estado, style="Seccion.TLabel"
+        ).pack(side="left")
+        self._pill_estado = Pill(fila_estado, "En curso", estilo="info", punto=True)
+        self._pill_estado.pack(side="right")
+        indicadores = ttk.Frame(marco)
+        indicadores.pack(fill="x", pady=(4, 0))
+        for etiqueta, variable in (
+            ("Empresas", self._var_total),
+            ("Procesadas", self._var_procesadas),
+            ("Pendientes", self._var_pendientes),
+            ("Progreso", self._var_porcentaje),
+        ):
+            bloque = ttk.Frame(indicadores)
+            bloque.pack(side="left", padx=(0, 24))
+            ttk.Label(bloque, text=etiqueta, style="Clave.TLabel").pack(anchor="w")
+            ttk.Label(
+                bloque,
+                textvariable=variable,
+                font=(ui_tema.FUENTE, 14, "bold"),
+            ).pack(anchor="w")
+
+        self._progreso = ttk.Progressbar(
+            marco, orient="horizontal", mode="determinate", maximum=100
+        )
+        self._progreso.pack(fill="x", pady=(6, 0))
+
+    def _construir_tabla(self) -> None:
+        marco = ttk.LabelFrame(self, text="Empresas consultadas", padding=6)
+        marco.pack(fill="both", expand=True, padx=18, pady=(4, 6))
+        columnas = tuple(columna for columna, _titulo, _ancho in self._COLUMNAS)
+        self._tabla = ttk.Treeview(
+            marco, columns=columnas, show="headings", selectmode="browse"
+        )
+        for columna, titulo, ancho in self._COLUMNAS:
+            self._tabla.heading(columna, text=titulo)
+            self._tabla.column(
+                columna,
+                width=ancho,
+                anchor="w",
+                stretch=columna == "detalle",
+            )
+        barra_y = ttk.Scrollbar(marco, orient="vertical", command=self._tabla.yview)
+        barra_x = ttk.Scrollbar(marco, orient="horizontal", command=self._tabla.xview)
+        self._tabla.configure(
+            yscrollcommand=barra_y.set, xscrollcommand=barra_x.set
+        )
+        self._tabla.grid(row=0, column=0, sticky="nsew")
+        barra_y.grid(row=0, column=1, sticky="ns")
+        barra_x.grid(row=1, column=0, sticky="ew")
+        marco.rowconfigure(0, weight=1)
+        marco.columnconfigure(0, weight=1)
+
+        self._tabla.tag_configure("pendiente", background="#F1F5F9")
+        self._tabla.tag_configure("consultando", background="#EAF2FF")
+        self._tabla.tag_configure("completada", background="#E7F7F0")
+        self._tabla.tag_configure("sin_resultados", background="#F4F7FC")
+        self._tabla.tag_configure("sin_esquema", background="#FEF3E2")
+        self._tabla.tag_configure("error", background="#FDECEC")
+        self._tabla.tag_configure("cancelada", background="#FEF3E2")
+
+        for empresa in self._empresas:
+            iid = f"e{len(self._iids)}"
+            self._iids[empresa] = iid
+            self._tabla.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    empresa,
+                    seguimiento.etiqueta(seguimiento.ESTADO_PENDIENTE),
+                    "—",
+                    "—",
+                    "En espera",
+                ),
+                tags=("pendiente",),
+            )
+
+    def _construir_resumen(self) -> None:
+        marco = ttk.LabelFrame(self, text="Resumen", padding=6)
+        marco.pack(fill="x", padx=18, pady=(0, 6))
+        ttk.Label(
+            marco,
+            textvariable=self._var_resumen,
+            style="TarjetaSecundaria.TLabel",
+            justify="left",
+            anchor="w",
+            wraplength=960,
+        ).pack(fill="x")
+
+    def _construir_botones(self) -> None:
+        botones = ttk.Frame(self)
+        botones.pack(fill="x", padx=18, pady=(0, 14))
+        self._btn_cerrar = ttk.Button(
+            botones, text="Cerrar", command=self._cerrar
+        )
+        self._btn_cerrar.pack(side="right")
+        self._btn_cancelar = ttk.Button(
+            botones,
+            text="Cancelar consulta",
+            style="Naranja.TButton",
+            command=self._solicitar_cancelacion,
+        )
+        self._btn_cancelar.pack(side="right", padx=(0, 8))
+
+    # ------------------------------------------------------------------
+    # Contrato con el repositorio (hilo trabajador)
+    # ------------------------------------------------------------------
+    def encolar(self, evento: dict[str, Any]) -> None:
+        """Recibe un evento desde el hilo de consulta sin tocar Tkinter."""
+
+        try:
+            self._cola.put(dict(evento))
+        except Exception:  # noqa: BLE001 - nunca tumbar la consulta
+            LOGGER.debug("Evento de seguimiento descartado", exc_info=True)
+
+    @property
+    def debe_cancelar(self) -> bool:
+        return bool(self._cancelar_solicitado)
+
+    # ------------------------------------------------------------------
+    # Actualización en el hilo principal
+    # ------------------------------------------------------------------
+    def _procesar_cola(self) -> None:
+        self._drenar_cola()
+        if not self._corriendo:
+            return
+        try:
+            self._after_id = self.after(120, self._procesar_cola)
+        except tk.TclError:  # pragma: no cover - ventana destruida
+            self._after_id = None
+
+    def _drenar_cola(self) -> None:
+        while True:
+            try:
+                evento = self._cola.get_nowait()
+            except queue.Empty:
+                break
+            self._registrar_evento(evento)
+
+    def _registrar_evento(self, evento: dict[str, Any]) -> None:
+        combinado = self._resumen.registrar(evento)
+        empresa = str(combinado.get("empresa") or "")
+        if not empresa:
+            return
+        iid = self._iids.get(empresa)
+        if iid is None:
+            return
+        estado = str(combinado.get("estado") or seguimiento.ESTADO_PENDIENTE)
+        resultados = combinado.get("resultados")
+        duracion = combinado.get("duracion")
+        detalle = str(combinado.get("detalle") or "")
+        self._tabla.item(
+            iid,
+            values=(
+                empresa,
+                seguimiento.etiqueta(estado),
+                "—" if resultados is None else str(resultados),
+                self._formato_tiempo(duracion),
+                detalle or "—",
+            ),
+            tags=(self._TAG_POR_ESTADO.get(estado, "pendiente"),),
+        )
+        self._actualizar_progreso()
+
+    def _actualizar_progreso(self) -> None:
+        datos = self._resumen.como_dict()
+        self._var_total.set(str(datos["total_empresas"]))
+        self._var_procesadas.set(str(datos["procesadas"]))
+        self._var_pendientes.set(str(datos["pendientes"]))
+        self._var_porcentaje.set(f"{datos['porcentaje']}%")
+        self._progreso["value"] = datos["porcentaje"]
+        self._var_resumen.set(self._texto_resumen(datos))
+
+    @staticmethod
+    def _formato_tiempo(valor: Any) -> str:
+        if valor is None:
+            return "—"
+        try:
+            segundos = float(valor)
+        except (TypeError, ValueError):
+            return "—"
+        if segundos < 60:
+            return f"{segundos:.2f} s"
+        minutos = int(segundos // 60)
+        return f"{minutos} min {segundos % 60:.1f} s"
+
+    @staticmethod
+    def _texto_resumen(datos: dict[str, Any]) -> str:
+        lineas = [
+            (
+                f"Empresas: {datos['total_empresas']} · "
+                f"Procesadas: {datos['procesadas']} · "
+                f"Pendientes: {datos['pendientes']}"
+            ),
+            (
+                f"Con resultados: {datos['con_resultados']} · "
+                f"Sin resultados: {datos['sin_resultados']} · "
+                f"Sin esquema: {datos['sin_esquema']}"
+            ),
+            (
+                f"Errores: {datos['errores']} · "
+                f"Canceladas: {datos['canceladas']} · "
+                f"Empleados encontrados: {datos['empleados']}"
+            ),
+            f"Duración total: {VentanaSeguimientoConsulta._formato_tiempo(datos['duracion_total'])}",
+        ]
+        mensaje = str(datos.get("mensaje") or "")
+        if mensaje:
+            lineas.append(mensaje)
+        return "\n".join(lineas)
+
+    # ------------------------------------------------------------------
+    # Finalización y cancelación
+    # ------------------------------------------------------------------
+    def finalizar(
+        self,
+        *,
+        resumen: dict[str, Any] | None = None,
+        mensaje: str = "",
+    ) -> None:
+        """Cierra el seguimiento con datos reales; la ventana queda visible."""
+
+        self._drenar_cola()
+        self._corriendo = False
+        if isinstance(resumen, dict):
+            try:
+                if resumen.get("duracion_total") is not None:
+                    self._resumen.duracion_total = float(
+                        resumen.get("duracion_total")
+                    )
+            except (TypeError, ValueError):
+                pass
+            if resumen.get("cancelada"):
+                self._resumen.cancelada = True
+        self._resumen.mensaje = str(mensaje or "")
+        datos = self._resumen.como_dict()
+        self._var_resumen.set(self._texto_resumen(datos))
+        self._progreso["value"] = datos["porcentaje"]
+        self._var_procesadas.set(str(datos["procesadas"]))
+        self._var_pendientes.set(str(datos["pendientes"]))
+        self._var_porcentaje.set(f"{datos['porcentaje']}%")
+
+        if datos["cancelada"]:
+            estado = "Consulta cancelada"
+            estilo = "warning"
+        elif datos["errores"]:
+            estado = "Consulta finalizada con errores"
+            estilo = "danger"
+        else:
+            estado = "Consulta finalizada"
+            estilo = "success"
+        self._var_estado.set(estado)
+        self._pill_estado.actualizar(estado, estilo)
+        self._btn_cancelar.configure(state="disabled")
+        self._btn_cerrar.configure(text="Cerrar")
+
+    def _solicitar_cancelacion(self) -> None:
+        if not self._corriendo or self._cancelar_solicitado:
+            return
+        if not messagebox.askyesno(
+            "Cancelar consulta",
+            "La consulta se detendrá al terminar la empresa actual. "
+            "Se conservarán los resultados ya obtenidos.\n\n"
+            "¿Desea cancelar?",
+        ):
+            return
+        self._cancelar_solicitado = True
+        self._btn_cancelar.configure(state="disabled")
+        self._var_estado.set("Cancelando: esperando el cierre de la empresa actual…")
+
+    def _cerrar(self) -> None:
+        if self._corriendo and not messagebox.askyesno(
+            "Cerrar seguimiento",
+            "La consulta continuará en segundo plano y los resultados se "
+            "aplicarán al finalizar.\n\n¿Desea cerrar esta ventana?",
+        ):
+            return
+        self._corriendo = False
+        if self._after_id is not None:
+            try:
+                self.after_cancel(self._after_id)
+            except tk.TclError:  # pragma: no cover
+                pass
+            self._after_id = None
         self.destroy()
 
 
