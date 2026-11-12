@@ -85,6 +85,29 @@ def _clave(valor: Any) -> str:
     return normalizar_nombre(valor)
 
 
+def _trazabilidad(detalle: dict[str, Any] | None) -> dict[str, str]:
+    """Normaliza los datos de la decisión sin obligar a quien no los tenga."""
+
+    if not isinstance(detalle, dict):
+        return {}
+    campos = (
+        "empleado",
+        "nombre",
+        "empresa",
+        "fuente",
+        "departamento",
+        "area",
+        "fecha",
+        "tipo_resolucion",
+    )
+    salida: dict[str, str] = {}
+    for campo in campos:
+        valor = detalle.get(campo)
+        if valor not in (None, ""):
+            salida[campo] = str(valor)
+    return salida
+
+
 def registrar(
     usuario: Any,
     area: Any,
@@ -94,11 +117,22 @@ def registrar(
     nota: str = "",
     ruta: Path | str | None = None,
     guardar: bool = True,
+    detalle: dict[str, Any] | None = None,
+    empleado: str = "",
+    nombre: str = "",
+    empresa: str = "",
+    fuente: str = "",
+    departamento: str = "",
+    tipo_resolucion: str = "",
 ) -> dict[str, Any] | None:
     """Registra o actualiza la procedencia de un usuario.
 
     Una asignación ``MANUAL`` siempre prevalece. Solo otra asignación manual
     puede reemplazarla; las de ``SQL_SERVER`` o ``LEGACY`` no la pisan.
+
+    Los parámetros opcionales conservan la trazabilidad de la decisión
+    (código, nombre, empresa, fuente, departamento, área y tipo de resolución)
+    sin cambiar la firma histórica de tres argumentos.
     """
 
     clave = _clave(usuario)
@@ -126,6 +160,21 @@ def registrar(
         "id_ejecucion": str(id_ejecucion or ""),
         "nota": str(nota or "")[:500],
     }
+    trazable = _trazabilidad(detalle)
+    for campo, valor in {
+        "empleado": empleado,
+        "nombre": nombre,
+        "empresa": empresa,
+        "fuente": fuente,
+        "departamento": departamento,
+        "tipo_resolucion": tipo_resolucion,
+    }.items():
+        if valor not in (None, ""):
+            trazable[campo] = str(valor)
+    if trazable:
+        trazable.setdefault("area", area_texto)
+        trazable.setdefault("fecha", ahora)
+        registro["trazabilidad"] = trazable
     registros[clave] = registro
     datos["historial"].append(
         {
@@ -137,6 +186,7 @@ def registrar(
             "origen_nuevo": origen,
             "fecha": ahora,
             "id_ejecucion": str(id_ejecucion or ""),
+            "trazabilidad": dict(trazable),
         }
     )
 
@@ -175,6 +225,11 @@ def registrar_lote(
             "id_ejecucion": str(item.get("id_ejecucion") or id_ejecucion),
             "nota": str(item.get("nota") or "")[:500],
         }
+        trazable = _trazabilidad(item.get("trazabilidad") or item.get("detalle"))
+        if trazable:
+            trazable.setdefault("area", area)
+            trazable.setdefault("fecha", ahora)
+            registro["trazabilidad"] = trazable
         registros[clave] = registro
         datos["historial"].append(
             {
@@ -186,6 +241,7 @@ def registrar_lote(
                 "origen_nuevo": origen,
                 "fecha": ahora,
                 "id_ejecucion": registro["id_ejecucion"],
+                "trazabilidad": dict(trazable),
             }
         )
         cantidad += 1
@@ -227,19 +283,33 @@ def como_dataframe(ruta: Path | str | None = None):
         "ACTUALIZADO",
         "ID_EJECUCION",
         "NOTA",
+        "EMPLEADO",
+        "NOMBRE",
+        "EMPRESA",
+        "FUENTE",
+        "DEPARTAMENTO",
+        "TIPO_RESOLUCION",
     ]
-    filas = [
-        {
-            "USUARIO": item.get("usuario", ""),
-            "CLAVE": item.get("clave", ""),
-            "AREA": item.get("area", ""),
-            "ORIGEN": item.get("origen", ""),
-            "ACTUALIZADO": item.get("actualizado", ""),
-            "ID_EJECUCION": item.get("id_ejecucion", ""),
-            "NOTA": item.get("nota", ""),
-        }
-        for item in datos.values()
-    ]
+    filas = []
+    for item in datos.values():
+        trazable = item.get("trazabilidad") or {}
+        filas.append(
+            {
+                "USUARIO": item.get("usuario", ""),
+                "CLAVE": item.get("clave", ""),
+                "AREA": item.get("area", ""),
+                "ORIGEN": item.get("origen", ""),
+                "ACTUALIZADO": item.get("actualizado", ""),
+                "ID_EJECUCION": item.get("id_ejecucion", ""),
+                "NOTA": item.get("nota", ""),
+                "EMPLEADO": trazable.get("empleado", ""),
+                "NOMBRE": trazable.get("nombre", ""),
+                "EMPRESA": trazable.get("empresa", ""),
+                "FUENTE": trazable.get("fuente", ""),
+                "DEPARTAMENTO": trazable.get("departamento", ""),
+                "TIPO_RESOLUCION": trazable.get("tipo_resolucion", ""),
+            }
+        )
     return pd.DataFrame(filas, columns=columnas)
 
 

@@ -243,6 +243,118 @@ class MaestroTickets:
         return cls(df, control)
 
     # ------------------------------------------------------------------
+    # Inspección previa de hojas (error 'Worksheet named Tickets not found')
+    # ------------------------------------------------------------------
+    @staticmethod
+    def inspeccionar_hojas(
+        ruta_xlsx: Path | str,
+        hoja_esperada: str | None = None,
+    ) -> dict[str, Any]:
+        """Informa qué archivo se leyó, sus hojas y la hoja esperada.
+
+        No crea hojas ni oculta el problema: devuelve un diagnóstico que la
+        interfaz puede mostrar cuando la auditoría de solicitantes no puede
+        ejecutarse.
+        """
+
+        ruta = Path(ruta_xlsx)
+        esperada = str(hoja_esperada or cfg.HOJA_DETALLE)
+        resultado: dict[str, Any] = {
+            "ruta": str(ruta),
+            "archivo": ruta.name,
+            "existe": ruta.is_file(),
+            "hojas": [],
+            "hoja_esperada": esperada,
+            "hoja_encontrada": "",
+            "problema": "",
+        }
+        if not ruta.is_file():
+            resultado["problema"] = f"No existe el archivo '{ruta}'."
+            return resultado
+        try:
+            libro = load_workbook(ruta, read_only=True, data_only=True)
+            try:
+                resultado["hojas"] = list(libro.sheetnames)
+            finally:
+                libro.close()
+        except (OSError, ValueError) as exc:
+            resultado["problema"] = (
+                f"No se pudo abrir '{ruta.name}': {exc}"
+            )
+            return resultado
+
+        for nombre in resultado["hojas"]:
+            if str(nombre).strip().casefold() == esperada.strip().casefold():
+                resultado["hoja_encontrada"] = str(nombre)
+                break
+        if not resultado["hoja_encontrada"]:
+            resultado["problema"] = (
+                f"El archivo '{ruta.name}' no contiene la hoja '{esperada}'. "
+                f"Hojas encontradas: {', '.join(resultado['hojas']) or 'ninguna'}."
+            )
+        return resultado
+
+    @classmethod
+    def leer_hoja_detalle(
+        cls,
+        ruta_xlsx: Path | str,
+        hoja_esperada: str | None = None,
+    ) -> tuple[pd.DataFrame, str, str]:
+        """Lee la hoja de detalle con un diagnóstico comprensible.
+
+        Si la hoja esperada no existe pero otra hoja contiene la columna
+        obligatoria ``USUARIO``, se usa esa hoja y se devuelve una advertencia.
+        Si ninguna sirve, se lanza ``ErrorEstructura`` con archivo, hojas y
+        hoja esperada. Nunca se crea una hoja vacía.
+        """
+
+        ruta = Path(ruta_xlsx)
+        diagnostico = cls.inspeccionar_hojas(ruta, hoja_esperada)
+        if not diagnostico["existe"] or "No se pudo abrir" in diagnostico["problema"]:
+            raise ErrorEstructura(diagnostico["problema"] or f"No existe '{ruta}'.")
+
+        encontrada = str(diagnostico["hoja_encontrada"])
+        if encontrada:
+            try:
+                df = leer_excel(ruta, sheet_name=encontrada)
+            except (OSError, ValueError) as exc:
+                raise ErrorArchivo(
+                    f"No se pudo leer la hoja '{encontrada}' de "
+                    f"'{ruta.name}': {exc}"
+                ) from exc
+            if C_SOLICITANTE in df.columns:
+                return df, encontrada, ""
+
+        # La hoja esperada no existe, no se pudo leer o no tiene la columna
+        # obligatoria. Se busca una alternativa segura antes de fallar.
+        for nombre in diagnostico["hojas"]:
+            if nombre == encontrada:
+                continue
+            try:
+                alternativa = leer_excel(ruta, sheet_name=nombre)
+            except (OSError, ValueError):
+                continue
+            if C_SOLICITANTE in alternativa.columns:
+                if encontrada:
+                    aviso = (
+                        f"La hoja '{encontrada}' no contiene la columna "
+                        f"'{C_SOLICITANTE}'; se auditó la hoja '{nombre}'."
+                    )
+                else:
+                    aviso = (
+                        f"La hoja esperada '{diagnostico['hoja_esperada']}' no "
+                        f"existe; se auditó la hoja '{nombre}' por contener la "
+                        f"columna '{C_SOLICITANTE}'."
+                    )
+                return alternativa, str(nombre), aviso
+        raise ErrorEstructura(
+            f"El archivo '{ruta.name}' no tiene una hoja utilizable para "
+            f"solicitantes. Hoja esperada: '{diagnostico['hoja_esperada']}'. "
+            f"Hojas encontradas: {', '.join(diagnostico['hojas']) or 'ninguna'}. "
+            f"Se requiere la columna '{C_SOLICITANTE}'."
+        )
+
+    # ------------------------------------------------------------------
     # Consultas
     # ------------------------------------------------------------------
     def a_dataframe(self) -> pd.DataFrame:

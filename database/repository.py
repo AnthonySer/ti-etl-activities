@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from config.sqlserver import EMPRESAS, ConfiguracionSQL
+from core.normalizador import limpiar_area
 from database import queries
 from database.connection import (
     ErrorConexionSQL,
@@ -107,7 +108,8 @@ class Empleado:
 
     @property
     def tiene_departamento(self) -> bool:
-        return bool(self.departamento.strip())
+        # "N/A", "NULL" o espacios no son un departamento utilizable.
+        return bool(limpiar_area(self.departamento))
 
     @property
     def identificador(self) -> tuple[str, str, str]:
@@ -286,8 +288,18 @@ class RepositorioEmpleados:
             return self._capacidades[empresa]
 
         sql = queries.sql_columnas_esquema(self.config.base_datos, empresa)
-        with self._fabrica(self.config) as conexion:
-            filas = self._ejecutor(conexion, sql, [empresa])
+        try:
+            with self._fabrica(self.config) as conexion:
+                filas = self._ejecutor(conexion, sql, [empresa])
+        except Exception as exc:  # noqa: BLE001 - se registra y se relanza
+            # Se conserva el fallo en la caché para no volver a conectar ni
+            # repetir la misma advertencia en cada lote de nombres.
+            self._capacidades[empresa] = {
+                "columnas": {},
+                "disponible": False,
+                "error": exc,
+            }
+            raise
 
         # Los dobles de prueba antiguos devuelven filas de empleados para
         # cualquier SQL. En ese caso no hay metadatos utilizables y se usa el
@@ -296,6 +308,7 @@ class RepositorioEmpleados:
         capacidad = {
             "columnas": columnas,
             "disponible": bool(columnas),
+            "error": None,
         }
         self._capacidades[empresa] = capacidad
         return capacidad
@@ -312,6 +325,13 @@ class RepositorioEmpleados:
         for empresa in empresas:
             try:
                 capacidad = self._leer_capacidades(empresa)
+                if capacidad.get("error") is not None:
+                    # Empresa ya falló en este repositorio: se informa sin
+                    # reintentar ni duplicar la advertencia en cada lote.
+                    resultado.errores.append(
+                        _clasificar_error_consulta(capacidad["error"], empresa)
+                    )
+                    continue
                 columnas = capacidad["columnas"] if capacidad["disponible"] else None
 
                 if capacidad["disponible"]:
@@ -386,13 +406,7 @@ class RepositorioEmpleados:
                 resultado.errores.append(_clasificar_error_consulta(exc, empresa))
             except Exception as exc:  # noqa: BLE001 - una empresa no bloquea el resto
                 LOGGER.exception("Error inesperado consultando la empresa %s", empresa)
-                resultado.errores.append(
-                    {
-                        "empresa": empresa,
-                        "categoria": "inesperado",
-                        "mensaje": str(exc),
-                    }
-                )
+                resultado.errores.append(_clasificar_error_consulta(exc, empresa))
         return resultado
 
     def buscar_por_nombres(
@@ -416,6 +430,8 @@ class RepositorioEmpleados:
         lote = max(1, int(self.config.lote))
         acumulado = ResultadoConsulta()
         huellas: set[tuple[str, str, str]] = set()
+        errores_vistos: set[tuple[str, str, str]] = set()
+        avisos_vistos: set[str] = set()
 
         for inicio in range(0, len(claves), lote):
             grupo = claves[inicio : inicio + lote]
@@ -425,8 +441,21 @@ class RepositorioEmpleados:
                     continue
                 huellas.add(empleado.identificador)
                 acumulado.empleados.append(empleado)
-            acumulado.errores.extend(parcial.errores)
-            acumulado.avisos.extend(parcial.avisos)
+            for error in parcial.errores:
+                huella_error = (
+                    str(error.get("empresa") or ""),
+                    str(error.get("categoria") or ""),
+                    str(error.get("mensaje") or ""),
+                )
+                if huella_error in errores_vistos:
+                    continue
+                errores_vistos.add(huella_error)
+                acumulado.errores.append(error)
+            for aviso in parcial.avisos:
+                if aviso in avisos_vistos:
+                    continue
+                avisos_vistos.add(aviso)
+                acumulado.avisos.append(aviso)
             for empresa in parcial.empresas_consultadas:
                 if empresa not in acumulado.empresas_consultadas:
                     acumulado.empresas_consultadas.append(empresa)
