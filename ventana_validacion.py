@@ -20,10 +20,12 @@ from config import configuracion as cfg
 from config.sqlserver import cargar_configuracion
 from core import procedencia
 from core import revision as svc_revision
+from core import seleccion_empleados as sel
 from core.maestro import Maestro
 from database.connection import controlador_disponible
 from database.resolucion import (
     CASO_A,
+    CASO_B,
     ESTADO_AMBIGUO,
     ESTADO_CONFLICTO,
     ESTADO_INACTIVO,
@@ -503,7 +505,12 @@ class VentanaValidacion(tk.Toplevel):
                     config, repositorio=repositorio
                 ).actualizar_desde_busqueda(consulta.empleados)
             resolver = ResolverAreas(cargar_empleados(), maestro=self.maestro)
-            return resolver.resolver_lote(nombres), consulta.errores
+            return (
+                resolver.resolver_lote(nombres),
+                list(consulta.errores),
+                list(consulta.empresas_sin_datos),
+                list(consulta.empresas_consultadas),
+            )
 
         def terminar(resultado):
             self._ocupado = False
@@ -511,52 +518,92 @@ class VentanaValidacion(tk.Toplevel):
                 self._var_resumen.set(f"Error al consultar SQL: {resultado}")
                 messagebox.showerror("Error de consulta", str(resultado))
                 return
-            resoluciones, errores = resultado
+            resoluciones, errores, sin_datos, consultadas = resultado
             asignados = 0
+            ambiguos: list[dict[str, Any]] = []
             for registro in registros:
                 clave = registro.get("clave") or ""
                 resolucion = resoluciones.get(clave)
                 if resolucion is None:
                     continue
+                candidatos = resolucion.candidatos_dict()
+                elegido = resolucion.empleado_dict()
                 if resolucion.asignable and resolucion.caso == CASO_A:
                     self.revision.actualizar(
                         registro.get("usuario"),
                         area=resolucion.area,
                         estado=ESTADO_VALIDADO,
                         validado=True,
+                        candidatos=candidatos,
+                        seleccionado=elegido,
                         origen=procedencia.SQL_SERVER,
                         motivo=resolucion.motivo,
+                        tipo_resolucion="automatica",
                         accion="consulta_sql",
                     )
                     self._asignar_en_maestro(
                         str(registro.get("usuario") or ""),
                         resolucion.area,
                         procedencia.SQL_SERVER,
+                        detalle=sel.registro_trazable(
+                            elegido,
+                            area=resolucion.area,
+                            tipo_resolucion="automatica",
+                        )
+                        if elegido
+                        else None,
                     )
                     asignados += 1
                 elif resolucion.conflicto:
-                    self.revision.actualizar(
+                    actualizado = self.revision.actualizar(
                         registro.get("usuario"),
                         estado=resolucion.estado,
                         validado=False,
+                        candidatos=candidatos,
+                        seleccionado=elegido or None,
                         motivo=resolucion.motivo,
+                        tipo_resolucion="automatica",
                         accion="conflicto_sql",
                     )
+                    actualizado["area_sugerida"] = resolucion.area
                 else:
-                    self.revision.actualizar(
+                    actualizado = self.revision.actualizar(
                         registro.get("usuario"),
                         estado=resolucion.estado,
-                        area=resolucion.area or registro.get("area_actual"),
                         validado=False,
+                        candidatos=candidatos,
+                        seleccionado=elegido or None,
                         motivo=resolucion.motivo,
+                        tipo_resolucion="automatica",
                         accion="consulta_sql",
                     )
+                    actualizado["area_sugerida"] = resolucion.area
+                    if resolucion.caso == CASO_B:
+                        ambiguos.append(registro)
             self.revision.guardar()
             self._refrescar()
-            mensaje = f"Consulta completada. Áreas asignadas: {asignados}."
+            mensaje = (
+                f"Consulta completada en {len(consultadas)} empresa(s). "
+                f"Áreas asignadas: {asignados}. "
+                f"Requieren selección manual: {len(ambiguos)}."
+            )
+            if sin_datos:
+                mensaje += f" Empresas sin datos: {len(sin_datos)}."
             if errores:
-                mensaje += f" Empresas con error: {len(errores)}."
+                detalle = "; ".join(
+                    f"{item.get('empresa', '?')} ({item.get('categoria', 'error')}): "
+                    f"{item.get('mensaje', '')}"
+                    for item in errores[:5]
+                )
+                mensaje += (
+                    f" Empresas con error: {len(errores)}. {detalle}"
+                )
             self._var_resumen.set(mensaje)
+            # La subventana se abre desde el hilo principal, nunca desde el
+            # trabajador. Si hay una sola coincidencia ambigua, se ofrece de
+            # inmediato la selección manual.
+            if len(registros) == 1 and len(ambiguos) == 1:
+                self.after(10, lambda: self._abrir_seleccion(ambiguos[0]))
 
         self._ejecutar(tarea, terminar)
 
@@ -586,7 +633,14 @@ class VentanaValidacion(tk.Toplevel):
             f"{registro.get('usuario')}: área asignada manualmente → {area}"
         )
 
-    def _asignar_en_maestro(self, usuario: str, area: str, origen: str) -> None:
+    def _asignar_en_maestro(
+        self,
+        usuario: str,
+        area: str,
+        origen: str,
+        *,
+        detalle: dict[str, Any] | None = None,
+    ) -> None:
         if self._al_asignar is not None:
             try:
                 self._al_asignar(usuario, area, origen)
@@ -594,7 +648,11 @@ class VentanaValidacion(tk.Toplevel):
                 LOGGER.error("No se pudo persistir la asignación: %s", exc)
         try:
             procedencia.registrar(
-                usuario, area, origen, nota="Validación de usuarios y áreas."
+                usuario,
+                area,
+                origen,
+                nota="Validación de usuarios y áreas.",
+                detalle=detalle,
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.error("No se pudo registrar la procedencia: %s", exc)
@@ -603,6 +661,9 @@ class VentanaValidacion(tk.Toplevel):
         registro = self._un_registro()
         if registro is None:
             return
+        self._abrir_seleccion(registro)
+
+    def _abrir_seleccion(self, registro: dict[str, Any]) -> None:
         candidatos = registro.get("candidatos") or []
         if not candidatos:
             messagebox.showinfo(
@@ -621,23 +682,43 @@ class VentanaValidacion(tk.Toplevel):
     def _elegir_candidato(
         self, registro: dict[str, Any], candidato: dict[str, Any]
     ) -> None:
-        self.revision.seleccionar_candidato(registro.get("usuario"), candidato)
-        area = (
-            candidato.get("DEPARTAMENTO")
-            or candidato.get("departamento")
-            or registro.get("area_actual")
+        """Resuelve el área usando exclusivamente el registro elegido."""
+
+        usuario = str(registro.get("usuario") or "")
+        resolver = ResolverAreas(cargar_empleados(), maestro=self.maestro)
+        resolucion = resolver.resolver_candidato(usuario, candidato)
+        area = resolucion.area if resolucion.caso == CASO_A and resolucion.asignable else ""
+        estado = ESTADO_VALIDADO if area else resolucion.estado
+        self.revision.registrar_seleccion(
+            usuario,
+            candidato,
+            area=area,
+            estado=estado,
+            motivo=resolucion.motivo,
+            tipo_resolucion="manual",
         )
         if area:
             self._asignar_en_maestro(
-                str(registro.get("usuario") or ""),
-                str(area),
+                usuario,
+                area,
                 procedencia.MANUAL,
+                detalle=sel.registro_trazable(
+                    candidato, area=area, tipo_resolucion="manual"
+                ),
             )
+            mensaje = (
+                f"{usuario}: seleccionado {sel.valor(candidato, 'empresa')} / "
+                f"{sel.valor(candidato, 'fuente')} → área {area}."
+            )
+        else:
+            mensaje = (
+                f"{usuario}: selección guardada sin asignar área. "
+                f"{resolucion.motivo}"
+            )
+            messagebox.showwarning("Selección sin área", mensaje)
         self.revision.guardar()
         self._refrescar()
-        self._var_resumen.set(
-            f"{registro.get('usuario')}: coincidencia seleccionada."
-        )
+        self._var_resumen.set(mensaje)
 
     def _validar_seleccionados(self) -> None:
         registros = self._seleccionados()
@@ -851,6 +932,19 @@ class VentanaAsignarArea(tk.Toplevel):
 
 
 class VentanaCoincidencias(tk.Toplevel):
+    """Selección manual del empleado, empresa y fuente correctos."""
+
+    _COLUMNAS = (
+        ("empleado", "EMPLEADO", 95),
+        ("nombre", "NOMBRE", 220),
+        ("empresa", "EMPRESA", 105),
+        ("fuente", "FUENTE", 110),
+        ("departamento", "DEPARTAMENTO", 180),
+        ("puesto", "PUESTO", 170),
+        ("activo", "ACTIVO", 95),
+        ("correo", "CORREO", 200),
+    )
+
     def __init__(
         self,
         padre: tk.Misc,
@@ -858,78 +952,219 @@ class VentanaCoincidencias(tk.Toplevel):
         usuario: str,
         candidatos: Iterable[dict[str, Any]],
         al_elegir: Callable[[dict[str, Any]], None],
+        al_cancelar: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(padre)
-        self.title("Revisar coincidencias")
-        self.geometry("820x420")
+        self.title("Seleccionar empleado / empresa correcta")
+        self.geometry("1180x560")
+        self.minsize(900, 420)
         self.configure(bg=FONDO)
         self.transient(padre)
         self.grab_set()
         self._candidatos = list(candidatos)
         self._al_elegir = al_elegir
+        self._al_cancelar = al_cancelar
+        self._iids: dict[str, dict[str, Any]] = {}
+        self._orden = ("empleado", False)
+
+        self._var_empleado = tk.StringVar()
+        self._var_nombre = tk.StringVar()
+        self._var_empresa = tk.StringVar(value="Todas")
+        self._var_fuente = tk.StringVar(value="Todas")
+        self._var_departamento = tk.StringVar(value="Todos")
+        self._var_conteo = tk.StringVar(value="")
 
         ttk.Label(
             self,
-            text=f"Coincidencias para: {usuario}",
+            text=f"Seleccionar empleado / empresa correcta — {usuario}",
             style="Seccion.TLabel",
-        ).pack(anchor="w", padx=18, pady=(14, 4))
+        ).pack(anchor="w", padx=18, pady=(14, 3))
         ttk.Label(
             self,
             text=(
-                "El sistema no elige automáticamente cuando hay varias "
-                "personas con el mismo nombre. Seleccione la correcta."
+                "Hay varias coincidencias. Elija el registro correcto; el área "
+                "se calculará con el departamento de esa empresa y fuente."
             ),
             style="Subtitulo.TLabel",
         ).pack(anchor="w", padx=18)
 
+        self._construir_filtros()
+        self._construir_tabla()
+        self._construir_botones()
+        self._refrescar()
+        self.protocol("WM_DELETE_WINDOW", self._cancelar)
+
+    # ------------------------------------------------------------------
+    def _construir_filtros(self) -> None:
         marco = ttk.Frame(self)
-        marco.pack(fill="both", expand=True, padx=18, pady=10)
-        columnas = ("empresa", "codigo", "nombre", "departamento", "estado")
+        marco.pack(fill="x", padx=18, pady=(10, 4))
+
+        ttk.Label(marco, text="Empleado:").grid(row=0, column=0, sticky="w")
+        entrada_empleado = ttk.Entry(
+            marco, textvariable=self._var_empleado, width=16
+        )
+        entrada_empleado.grid(row=0, column=1, padx=(4, 12))
+        ttk.Label(marco, text="Nombre:").grid(row=0, column=2, sticky="w")
+        entrada_nombre = ttk.Entry(
+            marco, textvariable=self._var_nombre, width=28
+        )
+        entrada_nombre.grid(row=0, column=3, padx=(4, 12))
+
+        for entrada in (entrada_empleado, entrada_nombre):
+            entrada.bind("<KeyRelease>", lambda _e: self._refrescar())
+
+        ttk.Label(marco, text="Empresa:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self._combo_empresa = ttk.Combobox(
+            marco,
+            textvariable=self._var_empresa,
+            values=["Todas"] + sel.opciones(self._candidatos, "empresa"),
+            state="readonly",
+            width=14,
+        )
+        self._combo_empresa.grid(row=1, column=1, padx=(4, 12), pady=(6, 0))
+        self._combo_empresa.bind("<<ComboboxSelected>>", lambda _e: self._refrescar())
+
+        ttk.Label(marco, text="Fuente:").grid(row=1, column=2, sticky="w", pady=(6, 0))
+        self._combo_fuente = ttk.Combobox(
+            marco,
+            textvariable=self._var_fuente,
+            values=["Todas"] + sel.opciones(self._candidatos, "fuente"),
+            state="readonly",
+            width=16,
+        )
+        self._combo_fuente.grid(row=1, column=3, padx=(4, 12), pady=(6, 0))
+        self._combo_fuente.bind("<<ComboboxSelected>>", lambda _e: self._refrescar())
+
+        ttk.Label(marco, text="Departamento:").grid(
+            row=1, column=4, sticky="w", pady=(6, 0)
+        )
+        self._combo_departamento = ttk.Combobox(
+            marco,
+            textvariable=self._var_departamento,
+            values=["Todos"] + sel.opciones(self._candidatos, "departamento"),
+            state="readonly",
+            width=24,
+        )
+        self._combo_departamento.grid(row=1, column=5, padx=(4, 8), pady=(6, 0))
+        self._combo_departamento.bind(
+            "<<ComboboxSelected>>", lambda _e: self._refrescar()
+        )
+
+        ttk.Button(
+            marco, text="Limpiar filtros", command=self._limpiar_filtros
+        ).grid(row=1, column=6, padx=(6, 0), pady=(6, 0))
+        ttk.Label(marco, textvariable=self._var_conteo).grid(
+            row=0, column=4, columnspan=3, sticky="e"
+        )
+
+    def _construir_tabla(self) -> None:
+        marco = ttk.Frame(self)
+        marco.pack(fill="both", expand=True, padx=18, pady=(4, 8))
+        columnas = tuple(columna for columna, _titulo, _ancho in self._COLUMNAS)
         self._tabla = ttk.Treeview(
             marco, columns=columnas, show="headings", selectmode="browse"
         )
-        for columna, titulo, ancho in (
-            ("empresa", "Empresa", 110),
-            ("codigo", "Código", 100),
-            ("nombre", "Nombre completo", 240),
-            ("departamento", "Departamento", 240),
-            ("estado", "Estado", 110),
-        ):
-            self._tabla.heading(columna, text=titulo)
-            self._tabla.column(columna, width=ancho, anchor="w")
-        barra = ttk.Scrollbar(marco, orient="vertical", command=self._tabla.yview)
-        self._tabla.configure(yscrollcommand=barra.set)
-        self._tabla.pack(side="left", fill="both", expand=True)
-        barra.pack(side="right", fill="y")
+        for columna, titulo, ancho in self._COLUMNAS:
+            self._tabla.heading(
+                columna,
+                text=titulo,
+                command=lambda c=columna: self._ordenar(c),
+            )
+            self._tabla.column(columna, width=ancho, anchor="w", stretch=False)
+        barra_y = ttk.Scrollbar(marco, orient="vertical", command=self._tabla.yview)
+        barra_x = ttk.Scrollbar(marco, orient="horizontal", command=self._tabla.xview)
+        self._tabla.configure(
+            yscrollcommand=barra_y.set, xscrollcommand=barra_x.set
+        )
+        self._tabla.grid(row=0, column=0, sticky="nsew")
+        barra_y.grid(row=0, column=1, sticky="ns")
+        barra_x.grid(row=1, column=0, sticky="ew")
+        marco.rowconfigure(0, weight=1)
+        marco.columnconfigure(0, weight=1)
 
-        for candidato in self._candidatos:
+        self._tabla.tag_configure("activo", background="#E7F7F0")
+        self._tabla.tag_configure("inactivo", background="#FDECEC")
+        self._tabla.tag_configure("desconocido", background="#F3F4F6")
+        self._tabla.bind("<<TreeviewSelect>>", lambda _e: self._actualizar_boton())
+
+    def _construir_botones(self) -> None:
+        botones = ttk.Frame(self)
+        botones.pack(fill="x", padx=18, pady=(0, 14))
+        self._btn_confirmar = ttk.Button(
+            botones,
+            text="Confirmar selección",
+            style="Principal.TButton",
+            command=self._elegir,
+            state="disabled",
+        )
+        self._btn_confirmar.pack(side="right")
+        ttk.Button(botones, text="Cancelar", command=self._cancelar).pack(
+            side="right", padx=(0, 8)
+        )
+
+    # ------------------------------------------------------------------
+    def _filtros(self) -> dict[str, str]:
+        def limpio(valor: str, comodin: str) -> str:
+            return "" if valor == comodin else valor
+
+        return {
+            "empleado": self._var_empleado.get().strip(),
+            "nombre": self._var_nombre.get().strip(),
+            "empresa": limpio(self._var_empresa.get(), "Todas"),
+            "fuente": limpio(self._var_fuente.get(), "Todas"),
+            "departamento": limpio(self._var_departamento.get(), "Todos"),
+        }
+
+    def _refrescar(self) -> None:
+        filtrados = sel.filtrar_candidatos(self._candidatos, **self._filtros())
+        columna, descendente = self._orden
+        filtrados = sel.ordenar_candidatos(
+            filtrados, columna, descendente=descendente
+        )
+        self._tabla.delete(*self._tabla.get_children())
+        self._iids.clear()
+        for indice, candidato in enumerate(filtrados):
+            iid = f"c{indice}"
+            self._iids[iid] = candidato
+            etiqueta = sel.valor(candidato, "activo")
+            tag = (
+                "activo"
+                if etiqueta == "Activo"
+                else "inactivo"
+                if etiqueta == "Inactivo"
+                else "desconocido"
+            )
             self._tabla.insert(
                 "",
                 "end",
-                values=(
-                    candidato.get("EMPRESA") or candidato.get("empresa") or "",
-                    candidato.get("EMPLEADO") or candidato.get("empleado") or "",
-                    candidato.get("NOMBRE") or candidato.get("nombre") or "",
-                    candidato.get("DEPARTAMENTO")
-                    or candidato.get("departamento")
-                    or "",
-                    candidato.get("ESTADO_EMPLEADO")
-                    or candidato.get("estado_empleado")
-                    or "",
+                iid=iid,
+                values=tuple(
+                    sel.valor(candidato, columna)
+                    for columna, _titulo, _ancho in self._COLUMNAS
                 ),
+                tags=(tag,),
             )
-
-        botones = ttk.Frame(self)
-        botones.pack(fill="x", padx=18, pady=(0, 14))
-        ttk.Button(
-            botones,
-            text="Seleccionar coincidencia",
-            style="Principal.TButton",
-            command=self._elegir,
-        ).pack(side="right")
-        ttk.Button(botones, text="Cancelar", command=self.destroy).pack(
-            side="right", padx=(0, 8)
+        self._var_conteo.set(
+            f"{len(filtrados)} de {len(self._candidatos)} coincidencias"
         )
+        self._actualizar_boton()
+
+    def _actualizar_boton(self) -> None:
+        estado = "normal" if self._tabla.selection() else "disabled"
+        self._btn_confirmar.configure(state=estado)
+
+    def _limpiar_filtros(self) -> None:
+        self._var_empleado.set("")
+        self._var_nombre.set("")
+        self._var_empresa.set("Todas")
+        self._var_fuente.set("Todas")
+        self._var_departamento.set("Todos")
+        self._refrescar()
+
+    def _ordenar(self, columna: str) -> None:
+        actual, descendente = self._orden
+        self._orden = (columna, not descendente if actual == columna else False)
+        self._refrescar()
 
     def _elegir(self) -> None:
         seleccion = self._tabla.selection()
@@ -938,8 +1173,15 @@ class VentanaCoincidencias(tk.Toplevel):
                 "Sin selección", "Seleccione una coincidencia de la lista."
             )
             return
-        indice = self._tabla.index(seleccion[0])
-        self._al_elegir(self._candidatos[indice])
+        candidato = self._iids.get(seleccion[0])
+        if candidato is None:
+            return
+        self._al_elegir(dict(candidato))
+        self.destroy()
+
+    def _cancelar(self) -> None:
+        if self._al_cancelar is not None:
+            self._al_cancelar()
         self.destroy()
 
 

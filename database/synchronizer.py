@@ -72,6 +72,10 @@ class ResultadoSincronizacion:
         default_factory=list
     )
     alertas: list[dict[str, str]] = field(default_factory=list)
+    empresas_sin_datos: list[str] = field(default_factory=list)
+    empresas_sin_esquema: list[str] = field(default_factory=list)
+    cache_conservada: bool = False
+    mensaje_cache: str = ""
 
     @property
     def cantidad_errores(self) -> int:
@@ -92,6 +96,10 @@ class ResultadoSincronizacion:
             "fecha": self.fecha,
             "cache_xlsx": self.cache_xlsx,
             "cache_csv": self.cache_csv,
+            "empresas_sin_datos": self.empresas_sin_datos,
+            "empresas_sin_esquema": self.empresas_sin_esquema,
+            "cache_conservada": self.cache_conservada,
+            "mensaje_cache": self.mensaje_cache,
         }
 
 
@@ -292,6 +300,42 @@ class Sincronizador:
         consulta: ResultadoConsulta = self.repositorio.obtener_todos(empresas)
         actuales = {_clave(item): item for item in consulta.empleados}
 
+        # Si una empresa falló, se conservan sus empleados de la caché anterior
+        # en lugar de eliminarlos por no haber podido consultarlos.
+        if consulta.errores and anteriores:
+            fallidas = set(consulta.empresas_con_error)
+            for clave, empleado in anteriores.items():
+                if empleado.empresa in fallidas and clave not in actuales:
+                    actuales[clave] = empleado
+
+        ahora = datetime.now().astimezone().isoformat(timespec="seconds")
+        if not actuales and (anteriores or consulta.errores):
+            # Nunca se reemplaza una caché válida por una consulta vacía o
+            # fallida. Se informa el motivo y se conservan los archivos.
+            mensaje = (
+                "No se actualizó la caché: la consulta no devolvió empleados"
+                + (
+                    f" y {len(consulta.errores)} empresa(s) reportaron error."
+                    if consulta.errores
+                    else "."
+                )
+            )
+            resultado = ResultadoSincronizacion(
+                errores=consulta.errores,
+                empresas=consulta.empresas_consultadas,
+                total_empleados=len(anteriores),
+                fecha=ahora,
+                cache_xlsx=str(ruta_cache_xlsx()) if ruta_cache_xlsx().is_file() else "",
+                cache_csv=str(ruta_cache_csv()) if ruta_cache_csv().is_file() else "",
+                empresas_sin_datos=list(consulta.empresas_sin_datos),
+                empresas_sin_esquema=list(consulta.empresas_sin_esquema),
+                cache_conservada=bool(anteriores),
+                mensaje_cache=mensaje,
+            )
+            _escribir_metadatos(resultado)
+            LOGGER.warning(mensaje)
+            return resultado
+
         nuevos = 0
         actualizados = 0
         departamentos_modificados = 0
@@ -337,8 +381,13 @@ class Sincronizador:
 
         lista = list(actuales.values())
         xlsx, csv = guardar_cache(lista, crear_backup=bool(anteriores))
-        ahora = datetime.now().astimezone().isoformat(timespec="seconds")
         alertas = _alertas_contra_maestro(detalles_departamentos)
+        mensaje_cache = ""
+        if consulta.errores and anteriores:
+            mensaje_cache = (
+                "Se conservaron los empleados de las empresas que fallaron; "
+                "no se eliminaron de la caché."
+            )
         resultado = ResultadoSincronizacion(
             nuevos=nuevos,
             actualizados=actualizados,
@@ -353,6 +402,10 @@ class Sincronizador:
             cache_csv=str(csv),
             departamentos_modificados_detalle=detalles_departamentos,
             alertas=alertas,
+            empresas_sin_datos=list(consulta.empresas_sin_datos),
+            empresas_sin_esquema=list(consulta.empresas_sin_esquema),
+            cache_conservada=bool(mensaje_cache),
+            mensaje_cache=mensaje_cache,
         )
         _escribir_metadatos(resultado)
         return resultado

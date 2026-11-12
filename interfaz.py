@@ -687,8 +687,21 @@ class VentanaConfiguracion(tk.Toplevel):
                 self._actualizar_estado_visual("error", str(resultado))
                 messagebox.showerror("Sincronización fallida", str(resultado))
                 return
+            errores = resultado.cantidad_errores
+            conectado = errores == 0 and resultado.total_empleados > 0
+            mensaje_estado = (
+                f"Sincronización completada: {resultado.total_empleados} empleados."
+                if conectado
+                else (
+                    "Sincronización incompleta: "
+                    f"{errores} empresa(s) con error; se conservaron "
+                    f"{resultado.total_empleados} empleados en caché."
+                )
+            )
             actualizada = registrar_prueba(
-                config, conectado=True, mensaje="Sincronización completada."
+                config,
+                conectado=conectado,
+                mensaje=mensaje_estado,
             ).clonar(ultima_sincronizacion=resultado.fecha)
             try:
                 guardar_configuracion(actualizada)
@@ -696,22 +709,36 @@ class VentanaConfiguracion(tk.Toplevel):
             except OSError as exc:
                 LOGGER.warning("No se pudo guardar la sincronización: %s", exc)
             self._actualizar_estado_visual(
-                "conectado",
-                f"Sincronización completada: {resultado.total_empleados} empleados.",
+                "conectado" if conectado else "error",
+                mensaje_estado,
             )
             self._actualizar_info_cache()
-            messagebox.showinfo(
-                "Sincronización completada",
+            detalle_errores = "\n".join(
+                f"  - {item.get('empresa', '?')} ({item.get('categoria', 'error')}): "
+                f"{item.get('mensaje', '')}"
+                for item in resultado.errores[:5]
+            )
+            texto = (
                 f"Nuevos: {resultado.nuevos}\n"
                 f"Actualizados: {resultado.actualizados}\n"
                 f"Departamentos modificados: {resultado.departamentos_modificados}\n"
                 f"Empleados sin departamento: {resultado.sin_departamento}\n"
                 f"Registros ambiguos: {resultado.ambiguos}\n"
-                f"Errores: {resultado.cantidad_errores}\n"
+                f"Empresas sin datos: {len(resultado.empresas_sin_datos)}\n"
+                f"Empresas sin esquema: {len(resultado.empresas_sin_esquema)}\n"
+                f"Errores: {errores}\n"
                 f"Alertas por conflicto con el maestro: {len(resultado.alertas)}\n"
                 f"Total almacenado: {resultado.total_empleados}\n"
-                f"Fecha: {resultado.fecha}",
+                f"Fecha: {resultado.fecha}"
             )
+            if resultado.mensaje_cache:
+                texto += f"\n{resultado.mensaje_cache}"
+            if detalle_errores:
+                texto += f"\n\nErrores:\n{detalle_errores}"
+            if errores:
+                messagebox.showwarning("Sincronización incompleta", texto)
+            else:
+                messagebox.showinfo("Sincronización completada", texto)
 
         self._ejecutar_tarea(tarea, terminar)
 
@@ -2742,17 +2769,25 @@ class AplicacionTk(tk.Tk):
                 else pd.DataFrame(columns=list(COLUMNAS_OFICIALES))
             )
             adicionales = None
+            aviso_hoja = ""
             if ruta_adicional is not None and Path(ruta_adicional).is_file():
-                try:
-                    adicionales = leer_excel(
-                        ruta_adicional, sheet_name=cfg.HOJA_DETALLE
-                    )
-                except ErrorArchivo:
-                    adicionales = leer_excel(ruta_adicional)
+                adicionales, _hoja, aviso_hoja = MaestroTickets.leer_hoja_detalle(
+                    ruta_adicional
+                )
             filas = svc_solicitantes.detectar_solicitantes(maestro, adicionales)
         except (ErrorArchivo, ErrorEstructura, OSError, ValueError) as exc:
             LOGGER.error("No se pudo auditar solicitantes: %s", exc)
-            self._var_info_solicitantes.set(f"No se pudo auditar solicitantes: {exc}")
+            detalle = ""
+            if ruta_adicional is not None:
+                diagnostico = MaestroTickets.inspeccionar_hojas(ruta_adicional)
+                detalle = (
+                    f" Archivo: {diagnostico.get('archivo')}. "
+                    f"Hojas: {', '.join(diagnostico.get('hojas') or []) or 'ninguna'}. "
+                    f"Hoja esperada: {diagnostico.get('hoja_esperada')}."
+                )
+            self._var_info_solicitantes.set(
+                f"Auditoría de solicitantes pendiente: {exc}.{detalle}"
+            )
             return
 
         self._solicitantes_por_iid.clear()
@@ -2778,12 +2813,15 @@ class AplicacionTk(tk.Tk):
                 pendientes += 1
             if fila["generico"]:
                 genericos += 1
-        self._var_info_solicitantes.set(
+        mensaje = (
             f"{len(filas)} solicitantes revisados | "
             f"{pendientes} coincidencias requieren decisión | "
             f"{genericos} solicitantes genéricos protegidos. "
             "Las sugerencias no fusionan ni modifican los nombres originales."
         )
+        if aviso_hoja:
+            mensaje += f" {aviso_hoja}"
+        self._var_info_solicitantes.set(mensaje)
 
     def _solicitante_seleccionado(self) -> dict[str, Any] | None:
         seleccion = self._tabla_solicitantes.selection()

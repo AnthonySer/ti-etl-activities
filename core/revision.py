@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from config import configuracion as cfg
+from core import seleccion_empleados as sel
 from core.archivos import ErrorArchivo, escribir_json_atomico
 from database.normalizador import normalizar_nombre
 
@@ -129,6 +130,8 @@ class Revision:
                     "motivo": str(resolucion.get("motivo") or ""),
                     "candidatos": list(resolucion.get("candidatos") or []),
                     "seleccionado": {},
+                    "seleccion": {},
+                    "trazabilidad": {},
                     "origen": str(resolucion.get("origen_anterior") or ""),
                     "validado": estado == ESTADO_VALIDADO,
                     "filas": list(item.get("filas") or []),
@@ -163,6 +166,8 @@ class Revision:
                     "motivo": str(conflicto.get("motivo") or ""),
                     "candidatos": list(conflicto.get("candidatos") or []),
                     "seleccionado": {},
+                    "seleccion": {},
+                    "trazabilidad": {},
                     "origen": str(conflicto.get("origen_anterior") or ""),
                     "validado": False,
                     "filas": list(conflicto.get("filas") or []),
@@ -247,9 +252,11 @@ class Revision:
         area: str | None = None,
         estado: str | None = None,
         seleccionado: dict[str, Any] | None = None,
+        candidatos: Iterable[dict[str, Any]] | None = None,
         validado: bool | None = None,
         origen: str | None = None,
         motivo: str | None = None,
+        tipo_resolucion: str = "manual",
         accion: str = "actualizacion",
     ) -> dict[str, Any]:
         registro = self.buscar(usuario)
@@ -263,22 +270,44 @@ class Revision:
         if estado is not None:
             registro["estado"] = str(estado)
             registro["validado"] = str(estado) == ESTADO_VALIDADO
+        if candidatos is not None:
+            registro["candidatos"] = [dict(candidato) for candidato in candidatos]
         if validado is not None:
             registro["validado"] = bool(validado)
         if seleccionado is not None:
             registro["seleccionado"] = dict(seleccionado)
             if seleccionado:
-                registro["empresa"] = str(seleccionado.get("EMPRESA") or "")
-                area_sel = _area(
-                    seleccionado.get("DEPARTAMENTO")
-                    or seleccionado.get("departamento")
-                    or registro.get("area_actual")
+                # El departamento del empleado NO es el área. El área se pasa
+                # explícitamente después de aplicar las equivalencias.
+                registro["empresa"] = str(
+                    seleccionado.get("empresa")
+                    or seleccionado.get("EMPRESA")
+                    or ""
                 )
-                if area_sel:
-                    registro["area_actual"] = area_sel
-                registro["validado"] = bool(registro.get("area_actual"))
-                if registro["validado"]:
-                    registro["estado"] = ESTADO_VALIDADO
+                registro["seleccion"] = sel.registro_trazable(
+                    seleccionado,
+                    area=_area(registro.get("area_actual")),
+                    tipo_resolucion=tipo_resolucion,
+                )
+                registro["trazabilidad"] = {
+                    "empleado": registro["seleccion"].get("empleado", ""),
+                    "nombre": registro["seleccion"].get("nombre", ""),
+                    "empresa": registro["seleccion"].get("empresa", ""),
+                    "fuente": registro["seleccion"].get("fuente", ""),
+                    "departamento": registro["seleccion"].get("departamento", ""),
+                    "area": _area(registro.get("area_actual")),
+                    "fecha": registro["seleccion"].get("fecha", ""),
+                    "tipo_resolucion": registro["seleccion"].get(
+                        "tipo_resolucion", "manual"
+                    ),
+                }
+                if area is None:
+                    # Sin área resuelta no se valida ni se inventa un área.
+                    registro["validado"] = False
+                else:
+                    registro["validado"] = bool(_area(registro.get("area_actual")))
+                    if registro["validado"]:
+                        registro["estado"] = ESTADO_VALIDADO
         if origen is not None:
             registro["origen"] = str(origen)
         if motivo is not None:
@@ -317,18 +346,88 @@ class Revision:
             accion="asignacion_manual",
         )
 
+    def registrar_seleccion(
+        self,
+        usuario: Any,
+        candidato: dict[str, Any],
+        *,
+        area: str = "",
+        estado: str | None = None,
+        motivo: str = "",
+        tipo_resolucion: str = "manual",
+        origen: str = "SQL_SERVER",
+    ) -> dict[str, Any]:
+        """Conserva la coincidencia elegida y su trazabilidad.
+
+        ``area`` debe ser el área ya resuelta por las equivalencias. El
+        departamento del candidato es solo el origen de esa resolución y nunca
+        se escribe como si fuera un área.
+        """
+
+        trazable = sel.registro_trazable(
+            candidato,
+            area=area,
+            tipo_resolucion=tipo_resolucion,
+        )
+        registro = self.actualizar(
+            usuario,
+            area=str(area or "").strip() or None,
+            estado=estado,
+            seleccionado=dict(candidato),
+            origen=origen,
+            motivo=motivo or "Coincidencia seleccionada manualmente entre varias.",
+            tipo_resolucion=tipo_resolucion,
+            accion="seleccion_candidato",
+        )
+        registro["seleccion"] = trazable
+        trazabilidad = registro.setdefault("trazabilidad", {})
+        trazabilidad.update(
+            {
+                "empleado": trazable.get("empleado", ""),
+                "nombre": trazable.get("nombre", ""),
+                "empresa": trazable.get("empresa", ""),
+                "fuente": trazable.get("fuente", ""),
+                "departamento": trazable.get("departamento", ""),
+                "area": _area(registro.get("area_actual")),
+                "fecha": trazable.get("fecha", ""),
+                "tipo_resolucion": trazable.get("tipo_resolucion", "manual"),
+            }
+        )
+        return registro
+
     def seleccionar_candidato(
         self,
         usuario: Any,
         candidato: dict[str, Any],
+        *,
+        area: str = "",
+        estado: str | None = None,
+        motivo: str = "",
+        tipo_resolucion: str = "manual",
     ) -> dict[str, Any]:
-        return self.actualizar(
+        """Compatibilidad: registra una selección manual del candidato."""
+
+        return self.registrar_seleccion(
             usuario,
-            seleccionado=candidato,
-            origen="SQL_SERVER",
-            motivo="Coincidencia seleccionada manualmente entre varias.",
-            accion="seleccion_candidato",
+            candidato,
+            area=area,
+            estado=estado,
+            motivo=motivo,
+            tipo_resolucion=tipo_resolucion,
         )
+
+    def seleccion_guardada_valida(
+        self,
+        usuario: Any,
+        actual: dict[str, Any] | None = None,
+    ) -> bool:
+        """Indica si la selección previa sigue siendo coherente."""
+
+        registro = self.buscar(usuario)
+        if not registro:
+            return False
+        guardada = registro.get("seleccion") or registro.get("seleccionado") or {}
+        return sel.seleccion_valida(guardada, actual)
 
     def validar_todos(self) -> int:
         """Marca como validados los registros que ya tienen un área."""
