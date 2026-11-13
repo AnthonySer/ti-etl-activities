@@ -38,7 +38,10 @@ from config.sqlserver import (
 )
 from core import asignaciones as svc_asignaciones
 from core import auditoria
+from core import catalogo_areas
+from core import diagnostico as svc_diagnostico
 from core import estado as svc_estado
+from core import eventos as svc_eventos
 from core import procedencia
 from core import revision as svc_revision
 from core import solicitantes as svc_solicitantes
@@ -922,7 +925,77 @@ class AplicacionTk(tk.Tk):
         self._refrescar_pendientes()
         self._refrescar_maestro()
         self._refrescar_auditoria()
+        self._suscripciones_eventos = [
+            svc_eventos.suscribir(
+                svc_eventos.ASIGNACION_REALIZADA, self._al_evento_datos
+            ),
+            svc_eventos.suscribir(
+                svc_eventos.USUARIO_ACTUALIZADO, self._al_evento_datos
+            ),
+            svc_eventos.suscribir(svc_eventos.AREA_CREADA, self._al_evento_datos),
+            svc_eventos.suscribir(
+                svc_eventos.CATALOGO_AREAS_ACTUALIZADO, self._al_evento_datos
+            ),
+            svc_eventos.suscribir(
+                svc_eventos.MAESTRO_ACTUALIZADO, self._al_evento_datos
+            ),
+            svc_eventos.suscribir(
+                svc_eventos.PROCESAMIENTO_FINALIZADO, self._al_evento_datos
+            ),
+            svc_eventos.suscribir(
+                svc_eventos.CONSULTA_SQL_FINALIZADA, self._al_evento_datos
+            ),
+        ]
         self._cola_after_id = self.after(120, self._procesar_cola)
+
+    # ------------------------------------------------------------------
+    # Actualización inmediata por eventos
+    # ------------------------------------------------------------------
+    def _al_evento_datos(self, evento: dict[str, Any]) -> None:
+        """Programa el refresco en el hilo de Tkinter sin bloquear el evento."""
+
+        try:
+            self.after(0, self._aplicar_evento, dict(evento))
+        except tk.TclError:  # la ventana ya se cerró
+            pass
+
+    def _aplicar_evento(self, evento: dict[str, Any]) -> None:
+        tema = str(evento.get("tema") or "")
+        try:
+            if tema in {
+                svc_eventos.ASIGNACION_REALIZADA,
+                svc_eventos.USUARIO_ACTUALIZADO,
+            }:
+                self._refrescar_usuarios()
+                self._refrescar_pendientes()
+                self._refrescar_panel()
+            elif tema == svc_eventos.AREA_CREADA:
+                self._refrescar_usuarios()
+                self._refrescar_maestro()
+                self._refrescar_pendientes()
+            elif tema == svc_eventos.CATALOGO_AREAS_ACTUALIZADO:
+                self._refrescar_maestro()
+            elif tema == svc_eventos.MAESTRO_ACTUALIZADO:
+                self._refrescar_maestro()
+                self._refrescar_usuarios()
+            elif tema == svc_eventos.PROCESAMIENTO_FINALIZADO:
+                self._refrescar_panel()
+            elif tema == svc_eventos.CONSULTA_SQL_FINALIZADA:
+                # La consulta SQL actualiza el caché de empleados y los
+                # pendientes; no obliga a reprocesar el archivo.
+                self._refrescar_pendientes()
+                self._refrescar_panel()
+        except Exception as exc:  # noqa: BLE001 - un refresco no rompe la app
+            LOGGER.error("No se pudo refrescar la interfaz para '%s': %s", tema, exc)
+
+    def destroy(self) -> None:
+        for cancelar in getattr(self, "_suscripciones_eventos", []):
+            try:
+                cancelar()
+            except Exception:  # noqa: BLE001
+                pass
+        self._suscripciones_eventos = []
+        super().destroy()
 
     # ------------------------------------------------------------------
     # Construcción visual
@@ -1774,6 +1847,14 @@ class AplicacionTk(tk.Tk):
             ruta_adicional=Path(estadisticas.archivo_salida)
         )
         self._refrescar_auditoria()
+        svc_eventos.publicar_procesamiento(
+            detalle="Procesamiento finalizado",
+            datos={
+                "archivo_salida": estadisticas.archivo_salida,
+                "registros": estadisticas.registros_totales,
+                "pendientes": estadisticas.registros_pendientes,
+            },
+        )
         self._terminar_ocupado()
         self._var_archivo.set("")
         self._limpiar_validacion_archivo(
@@ -1843,12 +1924,19 @@ class AplicacionTk(tk.Tk):
     def _asignar_desde_validacion(
         self, usuario: str, area: str, origen: str
     ) -> None:
+        # Las áreas manuales se validan con confirmación; las que provienen de
+        # SQL se normalizan sin interrumpir el procesamiento por lotes.
+        area_final = self._confirmar_area(
+            usuario, area, preguntar=(origen == procedencia.MANUAL)
+        )
+        if not area_final:
+            return
         try:
             with bloqueo("actualización de usuarios y áreas"):
                 svc_asignaciones.asignar_una(
                     self._maestro,
                     usuario,
-                    area,
+                    area_final,
                     usuario_ejecutor=os.getenv("USERNAME", ""),
                 )
         except Exception as exc:  # noqa: BLE001
@@ -1862,7 +1950,7 @@ class AplicacionTk(tk.Tk):
         self._refrescar_panel()
         self._refrescar_auditoria()
         self._var_info_usuario.set(
-            f"Asignación guardada: {usuario} → {area} ({origen})"
+            f"Asignación guardada: {usuario} → {area_final} ({origen})"
         )
 
     def _reanudar_revision(self) -> None:
@@ -2322,6 +2410,50 @@ class AplicacionTk(tk.Tk):
             area = partes[1].split("(")[0].strip()
             self._var_area.set(area)
 
+    def _confirmar_area(
+        self, usuario: str, area: str, *, preguntar: bool = True
+    ) -> str | None:
+        """Valida duplicados y áreas parecidas antes de escribir.
+
+        Devuelve el nombre canónico que debe guardarse, o ``None`` si la
+        persona cancela. No modifica el maestro por sí sola.
+        """
+
+        resultado = catalogo_areas.validar_area(area, maestro=self._maestro)
+        if not resultado.valido:
+            messagebox.showwarning("Área no válida", resultado.mensaje)
+            return None
+        if resultado.existente:
+            return resultado.area_reutilizable or resultado.nombre
+        if not preguntar:
+            return resultado.nombre
+
+        if resultado.similares:
+            similar = resultado.similares[0]
+            if messagebox.askyesno(
+                "Área parecida",
+                f"Ya existe el área '{similar.nombre}' "
+                f"({similar.similitud:.0%} de similitud).\n\n"
+                f"¿Desea reutilizar '{similar.nombre}' en lugar de crear "
+                f"'{resultado.nombre}'?",
+            ):
+                return similar.nombre
+            if not messagebox.askyesno(
+                "Confirmar área nueva",
+                f"'{resultado.nombre}' es parecida a '{similar.nombre}', pero "
+                "distinta.\n\n¿Registrarla como área nueva?",
+            ):
+                return None
+            return resultado.nombre
+
+        if not messagebox.askyesno(
+            "Confirmar área nueva",
+            f"El área '{resultado.nombre}' no existe en el maestro.\n\n"
+            f"¿Registrarla y asignarla a '{usuario}'?",
+        ):
+            return None
+        return resultado.nombre
+
     def _guardar_asignacion(self) -> None:
         usuario = self._var_usuario.get().strip()
         area = self._var_area.get().strip()
@@ -2329,6 +2461,9 @@ class AplicacionTk(tk.Tk):
             messagebox.showwarning(
                 "Datos incompletos", "Indique el usuario y el área."
             )
+            return
+        area = self._confirmar_area(usuario, area) or ""
+        if not area:
             return
         try:
             with bloqueo("actualización de usuarios y áreas"):
@@ -3260,6 +3395,11 @@ class AplicacionTk(tk.Tk):
             text="Abrir carpeta de datos",
             command=lambda: _abrir(cfg.DATA_DIR),
         ).pack(side="left", padx=8)
+        ttk.Button(
+            barra,
+            text="Diagnóstico",
+            command=self._mostrar_diagnostico,
+        ).pack(side="left", padx=8)
 
         self._tabla_auditoria = self._crear_tabla(
             self._tab_auditoria,
@@ -3327,6 +3467,81 @@ class AplicacionTk(tk.Tk):
             _abrir(cfg.AUDITORIA_CSV)
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("No se pudo abrir", str(exc))
+
+    def _mostrar_diagnostico(self) -> None:
+        """Muestra el diagnóstico del sistema sin exponer credenciales."""
+
+        try:
+            datos = svc_diagnostico.diagnosticar()
+        except Exception as exc:  # noqa: BLE001 - el diagnóstico no debe tumbar la app
+            LOGGER.exception("No se pudo generar el diagnóstico")
+            messagebox.showerror("No se pudo generar el diagnóstico", str(exc))
+            return
+
+        ventana = tk.Toplevel(self)
+        ventana.title("Diagnóstico del sistema")
+        ventana.geometry("820x560")
+        ventana.minsize(620, 420)
+        ventana.configure(bg=COLOR_FONDO)
+        ventana.transient(self)
+
+        cabecera = ttk.Frame(ventana, padding=(12, 10))
+        cabecera.pack(fill="x")
+        ttk.Label(
+            cabecera,
+            text="Diagnóstico del sistema",
+            style="Seccion.TLabel",
+        ).pack(side="left")
+        ttk.Label(
+            cabecera,
+            text=f"Generado: {datos.fecha}",
+            style="Subtitulo.TLabel",
+        ).pack(side="right")
+
+        marco = ttk.Frame(ventana, padding=(12, 0, 12, 8))
+        marco.pack(fill="both", expand=True)
+        texto = tk.Text(
+            marco,
+            wrap="word",
+            font=("Consolas", 9),
+            bg="white",
+            fg=COLOR_TEXTO,
+            relief="solid",
+            borderwidth=1,
+        )
+        vertical = ttk.Scrollbar(marco, orient="vertical", command=texto.yview)
+        texto.configure(yscrollcommand=vertical.set)
+        texto.pack(side="left", fill="both", expand=True)
+        vertical.pack(side="right", fill="y")
+        texto.insert("1.0", datos.como_markdown())
+        texto.configure(state="disabled")
+
+        pie = ttk.Frame(ventana, padding=(12, 0, 12, 12))
+        pie.pack(fill="x")
+
+        def guardar() -> None:
+            try:
+                destino = svc_diagnostico.guardar_diagnostico()
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("No se pudo guardar", str(exc))
+                return
+            messagebox.showinfo(
+                "Diagnóstico guardado",
+                f"Se guardó en:\n{destino}",
+            )
+
+        ttk.Button(pie, text="Guardar informe", command=guardar).pack(
+            side="left"
+        )
+        ttk.Button(
+            pie,
+            text="Abrir carpeta de reportes",
+            command=lambda: _abrir(cfg.REPORTES_DIR),
+        ).pack(side="left", padx=8)
+        ttk.Button(pie, text="Cerrar", command=ventana.destroy).pack(
+            side="right"
+        )
+        ventana.focus_set()
 
     # ------------------------------------------------------------------
     # Utilidades de interfaz e hilos

@@ -11,6 +11,7 @@ cerrar la ventana o la aplicación no hace perder el trabajo.
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import time
@@ -21,7 +22,10 @@ from typing import Any, Callable, Iterable
 from config import configuracion as cfg
 from config.sqlserver import cargar_configuracion
 from core import acciones_revision as acciones
+from core import asignacion_asistida as asistida
 from core import busqueda_solicitantes as busqueda_core
+from core import catalogo_areas
+from core import eventos
 from core import procedencia
 from core import revision as svc_revision
 from core import seguimiento_consultas as seguimiento
@@ -719,6 +723,19 @@ class VentanaValidacion(tk.Toplevel):
                         ambiguos.append(registro)
             self.revision.guardar()
             self._refrescar()
+            try:
+                eventos.publicar(
+                    eventos.CONSULTA_SQL_FINALIZADA,
+                    origen="validacion",
+                    consultadas=len(consultadas),
+                    empleados=resumen.get("empleados", 0),
+                    asignados=asignados,
+                    ambiguos=len(ambiguos),
+                    cancelada=bool(cancelada),
+                    errores=len(errores),
+                )
+            except Exception as exc:  # noqa: BLE001 - no bloquea el resultado
+                LOGGER.error("No se pudo publicar el fin de la consulta: %s", exc)
             mensaje = (
                 f"Consulta {'cancelada' if cancelada else 'completada'} en "
                 f"{len(consultadas)} empresa(s). "
@@ -768,6 +785,150 @@ class VentanaValidacion(tk.Toplevel):
             usuario=str(registro.get("usuario") or ""),
             areas=self._areas_disponibles(),
             al_guardar=lambda area: self._aplicar_asignacion(registro, area),
+        )
+
+    def _crear_area_desde_coincidencia(
+        self, registro: dict[str, Any], candidato: dict[str, Any]
+    ) -> None:
+        """Permite crear o reutilizar un área desde una coincidencia."""
+
+        usuario = str(registro.get("usuario") or "")
+        sugerida = str(
+            candidato.get("departamento")
+            or candidato.get("DEPARTAMENTO")
+            or candidato.get("area")
+            or ""
+        ).strip()
+        VentanaAsignarArea(
+            self,
+            usuario=usuario,
+            areas=self._areas_disponibles(),
+            area_inicial=sugerida,
+            al_guardar=lambda area: self._aplicar_area_nueva(
+                registro, candidato, area
+            ),
+        )
+
+    def _aplicar_area_nueva(
+        self,
+        registro: dict[str, Any],
+        candidato: dict[str, Any],
+        area: str,
+    ) -> None:
+        """Valida el área, pide confirmación y la asigna al usuario."""
+
+        usuario = str(registro.get("usuario") or "")
+        resultado = catalogo_areas.validar_area(area, maestro=self.maestro)
+        if not resultado.valido:
+            messagebox.showwarning("Área no válida", resultado.mensaje)
+            return
+
+        if resultado.existente:
+            area_final = resultado.area_reutilizable or resultado.nombre
+            if not messagebox.askyesno("Área existente", resultado.mensaje):
+                return
+        elif resultado.similares:
+            similar = resultado.similares[0]
+            if messagebox.askyesno(
+                "Área parecida",
+                f"Ya existe el área '{similar.nombre}' "
+                f"({similar.similitud:.0%} de similitud).\n\n"
+                f"¿Desea reutilizar '{similar.nombre}' en lugar de crear "
+                f"'{resultado.nombre}'?",
+            ):
+                area_final = similar.nombre
+            elif messagebox.askyesno(
+                "Confirmar área nueva",
+                f"'{resultado.nombre}' es parecida a '{similar.nombre}', pero "
+                "distinta.\n\n¿Registrarla como área nueva?",
+            ):
+                area_final = resultado.nombre
+            else:
+                return
+        else:
+            if not messagebox.askyesno(
+                "Confirmar área nueva",
+                f"El área '{resultado.nombre}' no existe en el maestro.\n\n"
+                f"¿Registrarla y asignarla a '{usuario}'?",
+            ):
+                return
+            area_final = resultado.nombre
+
+        if not self._confirmar_asignacion_candidato(
+            usuario, candidato, area_final
+        ):
+            return
+
+        try:
+            creacion = catalogo_areas.crear_area_para_usuario(
+                self.maestro,
+                usuario,
+                area_final,
+                confirmar=True,
+                usuario_ejecutor=os.getenv("USERNAME", ""),
+            )
+        except Exception as exc:  # noqa: BLE001 - se informa sin cerrar la app
+            LOGGER.exception("No se pudo registrar el área %s", area_final)
+            messagebox.showerror(
+                "No se pudo registrar el área", f"{usuario}: {exc}"
+            )
+            return
+        if creacion.asignacion is None:
+            messagebox.showwarning(
+                "Área no registrada",
+                creacion.mensaje or "No se modificó el maestro.",
+            )
+            return
+
+        self.revision.registrar_seleccion(
+            usuario,
+            candidato,
+            area=area_final,
+            estado=ESTADO_VALIDADO,
+            motivo="Área creada o reutilizada desde una coincidencia.",
+            tipo_resolucion="manual",
+        )
+        self.revision.guardar()
+        try:
+            procedencia.registrar(
+                usuario,
+                area_final,
+                procedencia.MANUAL,
+                nota="Validación de usuarios y áreas.",
+                detalle=sel.registro_trazable(
+                    candidato, area=area_final, tipo_resolucion="manual"
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error("No se pudo registrar la procedencia: %s", exc)
+        self._refrescar()
+        self._var_resumen.set(
+            f"{usuario}: área '{area_final}' registrada y asignada."
+        )
+
+    def _confirmar_asignacion_candidato(
+        self, usuario: str, candidato: dict[str, Any], area: str
+    ) -> bool:
+        """Confirma la asignación y advierte expresamente si está inactivo."""
+
+        preparacion = asistida.preparar_asignacion(
+            usuario, candidato, area=area
+        )
+        if not preparacion.area:
+            messagebox.showwarning(
+                "Sin área", preparacion.mensaje or "No hay un área asignable."
+            )
+            return False
+        if preparacion.inactivo:
+            return messagebox.askyesno(
+                "Usuario inactivo",
+                preparacion.mensaje
+                + "\n\n¿Confirma que desea asignarle un área sin reactivar "
+                "su cuenta?",
+            )
+        return messagebox.askyesno(
+            "Confirmar asignación",
+            f"{preparacion.mensaje}\n\n¿Desea continuar?",
         )
 
     def _aplicar_asignacion(self, registro: dict[str, Any], area: str) -> None:
@@ -829,6 +990,9 @@ class VentanaValidacion(tk.Toplevel):
             usuario=str(registro.get("usuario") or ""),
             candidatos=candidatos,
             al_elegir=lambda candidato: self._elegir_candidato(registro, candidato),
+            al_crear_area=lambda candidato: self._crear_area_desde_coincidencia(
+                registro, candidato
+            ),
         )
 
     def _elegir_candidato(
@@ -841,6 +1005,10 @@ class VentanaValidacion(tk.Toplevel):
         resolucion = resolver.resolver_candidato(usuario, candidato)
         area = resolucion.area if resolucion.caso == CASO_A and resolucion.asignable else ""
         estado = ESTADO_VALIDADO if area else resolucion.estado
+        if area and not self._confirmar_asignacion_candidato(
+            usuario, candidato, area
+        ):
+            return
         self.revision.registrar_seleccion(
             usuario,
             candidato,
@@ -1070,6 +1238,7 @@ class VentanaAsignarArea(tk.Toplevel):
         usuario: str,
         areas: Iterable[str],
         al_guardar: Callable[[str], None],
+        area_inicial: str = "",
     ) -> None:
         super().__init__(padre)
         self.title("Asignar área")
@@ -1088,7 +1257,7 @@ class VentanaAsignarArea(tk.Toplevel):
             style="Subtitulo.TLabel",
         ).pack(anchor="w", padx=18)
 
-        self._var_area = tk.StringVar()
+        self._var_area = tk.StringVar(value=area_inicial)
         combo = ttk.Combobox(
             self,
             textvariable=self._var_area,
@@ -1735,7 +1904,9 @@ class VentanaCoincidencias(tk.Toplevel):
 
     _COLUMNAS = (
         ("empleado", "EMPLEADO", 95),
-        ("nombre", "NOMBRE", 220),
+        ("nombre", "NOMBRE", 200),
+        ("tipo", "COINCIDENCIA", 120),
+        ("similitud", "SIMILITUD", 95),
         ("empresa", "EMPRESA", 105),
         ("fuente", "FUENTE", 110),
         ("departamento", "DEPARTAMENTO", 180),
@@ -1752,6 +1923,7 @@ class VentanaCoincidencias(tk.Toplevel):
         candidatos: Iterable[dict[str, Any]],
         al_elegir: Callable[[dict[str, Any]], None],
         al_cancelar: Callable[[], None] | None = None,
+        al_crear_area: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         super().__init__(padre)
         self.title("Seleccionar empleado / empresa correcta")
@@ -1763,6 +1935,7 @@ class VentanaCoincidencias(tk.Toplevel):
         self._candidatos = list(candidatos)
         self._al_elegir = al_elegir
         self._al_cancelar = al_cancelar
+        self._al_crear_area = al_crear_area
         self._iids: dict[str, dict[str, Any]] = {}
         self._orden = ("empleado", False)
 
@@ -1900,6 +2073,14 @@ class VentanaCoincidencias(tk.Toplevel):
         ttk.Button(botones, text="Cancelar", command=self._cancelar).pack(
             side="right", padx=(0, 8)
         )
+        self._btn_crear_area = ttk.Button(
+            botones,
+            text="Crear área nueva…",
+            command=self._crear_area,
+            state="disabled",
+        )
+        if self._al_crear_area is not None:
+            self._btn_crear_area.pack(side="left")
 
     # ------------------------------------------------------------------
     def _filtros(self) -> dict[str, str]:
@@ -1917,9 +2098,18 @@ class VentanaCoincidencias(tk.Toplevel):
     def _refrescar(self) -> None:
         filtrados = sel.filtrar_candidatos(self._candidatos, **self._filtros())
         columna, descendente = self._orden
-        filtrados = sel.ordenar_candidatos(
-            filtrados, columna, descendente=descendente
-        )
+        if columna in ("tipo", "similitud"):
+            filtrados = sorted(
+                filtrados,
+                key=lambda candidato: self._clave_orden_especial(
+                    candidato, columna
+                ),
+                reverse=descendente,
+            )
+        else:
+            filtrados = sel.ordenar_candidatos(
+                filtrados, columna, descendente=descendente
+            )
         self._tabla.delete(*self._tabla.get_children())
         self._iids.clear()
         for indice, candidato in enumerate(filtrados):
@@ -1938,7 +2128,7 @@ class VentanaCoincidencias(tk.Toplevel):
                 "end",
                 iid=iid,
                 values=tuple(
-                    sel.valor(candidato, columna)
+                    self._valor_columna(candidato, columna)
                     for columna, _titulo, _ancho in self._COLUMNAS
                 ),
                 tags=(tag,),
@@ -1948,9 +2138,49 @@ class VentanaCoincidencias(tk.Toplevel):
         )
         self._actualizar_boton()
 
+    @staticmethod
+    def _clave_orden_especial(
+        candidato: dict[str, Any], columna: str
+    ) -> tuple[int, float | int]:
+        if columna == "similitud":
+            try:
+                return (0, float(candidato.get("similitud") or 0))
+            except (TypeError, ValueError):
+                return (1, 0)
+        tipos = {
+            "exacta": 0,
+            "alta": 1,
+            "intermedia": 2,
+            "baja": 3,
+        }
+        tipo = str(candidato.get("tipo") or "").strip().lower()
+        return (0, tipos.get(tipo, 4))
+
+    def _valor_columna(self, candidato: dict[str, Any], columna: str) -> str:
+        if columna == "tipo":
+            tipo = str(candidato.get("tipo") or "").strip().lower()
+            return {
+                "exacta": "Exacta",
+                "alta": "Alta",
+                "intermedia": "Intermedia",
+                "baja": "Baja",
+            }.get(tipo, "—")
+        if columna == "similitud":
+            try:
+                return f"{float(candidato.get('similitud') or 0):.0%}"
+            except (TypeError, ValueError):
+                return "—"
+        return sel.valor(candidato, columna)
+
     def _actualizar_boton(self) -> None:
-        estado = "normal" if self._tabla.selection() else "disabled"
-        self._btn_confirmar.configure(state=estado)
+        hay_seleccion = bool(self._tabla.selection())
+        self._btn_confirmar.configure(
+            state="normal" if hay_seleccion else "disabled"
+        )
+        if self._al_crear_area is not None:
+            self._btn_crear_area.configure(
+                state="normal" if hay_seleccion else "disabled"
+            )
 
     def _limpiar_filtros(self) -> None:
         self._var_empleado.set("")
@@ -1976,6 +2206,19 @@ class VentanaCoincidencias(tk.Toplevel):
         if candidato is None:
             return
         self._al_elegir(dict(candidato))
+        self.destroy()
+
+    def _crear_area(self) -> None:
+        seleccion = self._tabla.selection()
+        if not seleccion:
+            messagebox.showinfo(
+                "Sin selección", "Seleccione una coincidencia de la lista."
+            )
+            return
+        candidato = self._iids.get(seleccion[0])
+        if candidato is None or self._al_crear_area is None:
+            return
+        self._al_crear_area(dict(candidato))
         self.destroy()
 
     def _cancelar(self) -> None:

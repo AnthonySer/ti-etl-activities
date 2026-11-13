@@ -130,6 +130,8 @@ class BaseTemporal(unittest.TestCase):
         "MAESTRO_CSV",
         "AUDITORIA_CSV",
         "ESTADO_UI_JSON",
+        "OPERACIONES_JSON",
+        "HUELLAS_EXCEL_JSON",
         "LOCK_SISTEMA",
     )
 
@@ -148,6 +150,8 @@ class BaseTemporal(unittest.TestCase):
         cfg.MAESTRO_CSV = cfg.DATA_DIR / "maestro_areas.csv"
         cfg.AUDITORIA_CSV = cfg.DATA_DIR / "auditoria_ejecuciones.csv"
         cfg.ESTADO_UI_JSON = cfg.DATA_DIR / "estado_ui.json"
+        cfg.OPERACIONES_JSON = cfg.DATA_DIR / "operaciones.json"
+        cfg.HUELLAS_EXCEL_JSON = cfg.DATA_DIR / "huellas_excel.json"
         cfg.LOCK_SISTEMA = cfg.DATA_DIR / ".sistema.lock"
         cfg.asegurar_directorios()
 
