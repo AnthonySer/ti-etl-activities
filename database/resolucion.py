@@ -15,11 +15,10 @@ conflicto en lugar de sobrescribirla.
 
 from __future__ import annotations
 
-import difflib
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Sequence
 
-from core import procedencia
+from core import procedencia, similitud
 from core.normalizador import limpiar_area
 from database.normalizador import (
     claves_empleado,
@@ -169,9 +168,7 @@ class ResolverAreas:
             ):
                 if not otra:
                     continue
-                ratio = difflib.SequenceMatcher(None, clave, otra).ratio()
-                if clave in otra or otra in clave:
-                    ratio = max(ratio, 0.9)
+                ratio = similitud.comparar(clave, otra)
                 if ratio >= self.umbral_sugerencia:
                     resultados.append((ratio, empleado))
                     break
@@ -183,6 +180,7 @@ class ResolverAreas:
                 "nombre": empleado.nombre_completo,
                 "departamento": empleado.departamento,
                 "similitud": round(ratio, 3),
+                "tipo": similitud.clasificar(ratio),
             }
             for ratio, empleado in resultados[: self.limite_sugerencias]
         ]

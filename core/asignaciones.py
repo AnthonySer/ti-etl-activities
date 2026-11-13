@@ -7,7 +7,6 @@ la correspondencia y deja registro en la auditoría.
 
 from __future__ import annotations
 
-import difflib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -17,7 +16,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import pandas as pd
 
 from config import configuracion as cfg
-from core import auditoria
+from core import auditoria, eventos, similitud
 from core.archivos import ErrorArchivo, ErrorEstructura
 from core.maestro import Maestro, ResultadoActualizacion
 from core.normalizador import (
@@ -113,7 +112,9 @@ def tabla_usuarios(
 
 
 def _ratio(a: str, b: str) -> float:
-    return difflib.SequenceMatcher(None, a, b).ratio()
+    """Se conserva por compatibilidad; ahora usa el motor de similitud."""
+
+    return similitud.comparar(a, b)
 
 
 def sugerencias_usuario(
@@ -139,16 +140,14 @@ def sugerencias_usuario(
         otra = normalizar_usuario(nombre)
         if otra is None or otra == clave:
             continue
-        puntaje = _ratio(clave, otra)
-        # Coincidencia por contención (nombres incompletos, orden distinto).
-        if clave in otra or otra in clave:
-            puntaje = max(puntaje, 0.85)
+        puntaje = similitud.comparar(clave, otra)
         if puntaje >= umbral:
             resultado.append(
                 {
                     "usuario": nombre,
                     "area": str(fila[cfg.COLUMNA_AREA]),
                     "similitud": round(puntaje, 3),
+                    "tipo": similitud.clasificar(puntaje),
                 }
             )
 
@@ -226,6 +225,70 @@ def _clasificar(
     )
 
 
+def _registrar_en_diario(
+    diario: Any,
+    detalle: Sequence[Asignacion],
+    *,
+    ruta: Path | str | None,
+    usuario_ejecutor: str,
+    estado: str,
+    error: str = "",
+) -> None:
+    """Registra cada cambio en el diario de operaciones sin bloquear el flujo."""
+
+    from core import operaciones as svc_operaciones
+
+    diario = diario or svc_operaciones.DiarioOperaciones()
+    for asignacion in detalle:
+        if asignacion.accion == "sin_cambios":
+            continue
+        try:
+            operacion = diario.registrar(
+                "ASIGNAR_AREA",
+                usuario=asignacion.usuario,
+                area_anterior=asignacion.area_anterior,
+                area_nueva=asignacion.area,
+                origen="maestro",
+                archivo=str(ruta or cfg.MAESTRO_XLSX),
+                detalle=(
+                    f"{asignacion.usuario}: '{asignacion.area_anterior}' -> "
+                    f"'{asignacion.area}' ({asignacion.accion})"
+                ),
+                estado=estado,
+                extra=asignacion.accion,
+            )
+            if error and operacion is not None:
+                diario.marcar(operacion.clave, estado, error=error)
+        except Exception as exc:  # noqa: BLE001 - el diario no debe tumbar la asignación
+            LOGGER.error("No se pudo registrar la operación en el diario: %s", exc)
+
+
+def _preparar_guardado_protegido(
+    ruta: Path | str | None,
+    *,
+    registro: Any = None,
+    confirmar_cambio_externo: bool,
+) -> Any:
+    """Comprueba bloqueo y cambios externos antes de modificar el maestro."""
+
+    from core import integridad_excel as integridad
+
+    camino = Path(ruta or cfg.MAESTRO_XLSX)
+    registro = registro or integridad.RegistroHuellas()
+    if integridad.archivo_bloqueado(camino):
+        raise integridad.ErrorIntegridad(
+            f"El Excel maestro '{camino.name}' está abierto en Excel. "
+            "Cierre el archivo antes de guardar."
+        )
+    comparacion = registro.comparar(camino)
+    if comparacion.get("cambio_externo") and not confirmar_cambio_externo:
+        raise integridad.ErrorCambioExterno(
+            f"El Excel maestro '{camino.name}' cambió fuera de la aplicación. "
+            "Revise el archivo y confirme si desea sobrescribirlo."
+        )
+    return registro
+
+
 def asignar(
     maestro: Maestro,
     asignaciones: Sequence[tuple[str, str] | Mapping[str, Any]],
@@ -233,8 +296,17 @@ def asignar(
     guardar: bool = True,
     ruta_xlsx: Path | str | None = None,
     usuario_ejecutor: str = "",
+    proteger: bool = True,
+    confirmar_cambio_externo: bool = False,
+    diario: Any = None,
+    registro: Any = None,
 ) -> ResultadoAsignaciones:
-    """Registra o actualiza una o varias correspondencias y las persiste."""
+    """Registra o actualiza una o varias correspondencias y las persiste.
+
+    Con ``proteger=True`` (predeterminado) se detectan cambios externos, se
+    evita escribir sobre un Excel abierto y cada cambio queda en el diario de
+    operaciones. Los reintentos de la misma asignación no se duplican.
+    """
 
     normalizadas: list[dict[str, str]] = []
     detalle: list[Asignacion] = []
@@ -269,12 +341,58 @@ def asignar(
     if not normalizadas:
         return ResultadoAsignaciones()
 
-    df = pd.DataFrame(normalizadas, columns=list(COLUMNAS_VISTA))
-    resultado = maestro.actualizar(df, manifiesto=None)
+    registro_huellas = None
+    if guardar and proteger:
+        # Se comprueba antes de modificar el maestro en memoria: si el archivo
+        # cambió fuera de la aplicación, no queda una asignación fantasma.
+        registro_huellas = _preparar_guardado_protegido(
+            ruta_xlsx,
+            registro=registro,
+            confirmar_cambio_externo=confirmar_cambio_externo,
+        )
 
+    df = pd.DataFrame(normalizadas, columns=list(COLUMNAS_VISTA))
     guardado = None
+    try:
+        resultado = maestro.actualizar(df, manifiesto=None)
+        if guardar:
+            if proteger:
+                from core import integridad_excel as integridad
+
+                guardado = integridad.guardar_maestro_seguro(
+                    maestro,
+                    ruta_xlsx,
+                    confirmar_cambio_externo=confirmar_cambio_externo,
+                    registro=registro_huellas,
+                    diario=diario,
+                    usuario_ejecutor=usuario_ejecutor,
+                    detalle=(
+                        f"Persistencia de {len(detalle)} asignación(es) de áreas"
+                    ),
+                    tipo_operacion="ASIGNAR_AREA",
+                )
+            else:
+                guardado = maestro.guardar(ruta_xlsx=ruta_xlsx, crear_backup=True)
+    except Exception as exc:
+        if guardar:
+            _registrar_en_diario(
+                diario,
+                detalle,
+                ruta=ruta_xlsx,
+                usuario_ejecutor=usuario_ejecutor,
+                estado="ERROR",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        raise
+
     if guardar:
-        guardado = maestro.guardar(ruta_xlsx=ruta_xlsx, crear_backup=True)
+        _registrar_en_diario(
+            diario,
+            detalle,
+            ruta=ruta_xlsx,
+            usuario_ejecutor=usuario_ejecutor,
+            estado="COMPLETADO",
+        )
 
     for asignacion in detalle:
         try:
@@ -297,6 +415,34 @@ def asignar(
         sum(1 for a in detalle if a.accion == "actualizada"),
         sum(1 for a in detalle if a.accion == "sin_cambios"),
     )
+
+    # Solo se notifican los cambios reales. La interfaz refresca la fila
+    # afectada sin reprocesar el archivo ni repetir consultas SQL.
+    for asignacion in detalle:
+        if asignacion.accion == "sin_cambios":
+            continue
+        eventos.publicar_asignacion(
+            asignacion.usuario,
+            asignacion.area,
+            area_anterior=asignacion.area_anterior,
+            origen="maestro",
+            detalle=asignacion.accion,
+            datos={"clave": asignacion.clave, "accion": asignacion.accion},
+        )
+        eventos.publicar(
+            eventos.USUARIO_ACTUALIZADO,
+            usuario=asignacion.usuario,
+            area=asignacion.area,
+            area_anterior=asignacion.area_anterior,
+            origen="maestro",
+            detalle=asignacion.accion,
+        )
+    if guardado is not None and any(a.accion != "sin_cambios" for a in detalle):
+        eventos.publicar_maestro_actualizado(
+            detalle="Asignación de áreas persistida",
+            datos={"registros": len(detalle)},
+        )
+
     return ResultadoAsignaciones(
         asignaciones=detalle,
         resultado=resultado,
@@ -312,6 +458,10 @@ def asignar_una(
     guardar: bool = True,
     ruta_xlsx: Path | str | None = None,
     usuario_ejecutor: str = "",
+    proteger: bool = True,
+    confirmar_cambio_externo: bool = False,
+    diario: Any = None,
+    registro: Any = None,
 ) -> ResultadoAsignaciones:
     return asignar(
         maestro,
@@ -319,6 +469,10 @@ def asignar_una(
         guardar=guardar,
         ruta_xlsx=ruta_xlsx,
         usuario_ejecutor=usuario_ejecutor,
+        proteger=proteger,
+        confirmar_cambio_externo=confirmar_cambio_externo,
+        diario=diario,
+        registro=registro,
     )
 
 

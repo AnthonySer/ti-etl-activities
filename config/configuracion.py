@@ -52,6 +52,15 @@ AUDITORIA_CSV = BASE_DIR / DEFAULT_CONFIG["auditoria_csv"]
 # Estado de la interfaz (último procesamiento, rutas y métricas).
 ESTADO_UI_JSON = DATA_DIR / "estado_ui.json"
 
+# Diario de operaciones y huellas del Excel maestro (Fase 5/6).
+OPERACIONES_JSON = DATA_DIR / "operaciones.json"
+HUELLAS_EXCEL_JSON = DATA_DIR / "huellas_excel.json"
+
+# Umbrales del motor de similitud (Fase 2). Se pueden ajustar con pruebas.
+UMBRAL_SIMILITUD_EXACTA = 0.999
+UMBRAL_SIMILITUD_ALTA = 0.88
+UMBRAL_SIMILITUD_INTERMEDIA = 0.72
+
 # Bloqueo cooperativo para evitar dos escrituras simultáneas.
 LOCK_SISTEMA = DATA_DIR / ".sistema.lock"
 
@@ -266,6 +275,8 @@ def aplicar_configuracion(config: dict[str, Any]) -> dict[str, Any]:
     globals()["HISTORIAL_CSV"] = globals()["DATA_DIR"] / "maestro_historial.csv"
     globals()["HISTORIAL_TICKETS_CSV"] = globals()["DATA_DIR"] / "maestro_tickets_historial.csv"
     globals()["ESTADO_UI_JSON"] = globals()["DATA_DIR"] / "estado_ui.json"
+    globals()["OPERACIONES_JSON"] = globals()["DATA_DIR"] / "operaciones.json"
+    globals()["HUELLAS_EXCEL_JSON"] = globals()["DATA_DIR"] / "huellas_excel.json"
     globals()["LOCK_SISTEMA"] = globals()["DATA_DIR"] / ".sistema.lock"
     globals()["LOG_FILE"] = globals()["LOGS_DIR"] / "sistema.log"
     globals()["RUTAS_BUSQUEDA"] = [
