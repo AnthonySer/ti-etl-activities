@@ -3247,6 +3247,56 @@ class AplicacionTk(tk.Tk):
             command=lambda: _abrir(cfg.REPORTES_DIR),
         ).pack(side="left", padx=8)
 
+        fila_docx = ttk.Frame(self._tab_reportes)
+        fila_docx.pack(fill="x", pady=(4, 4))
+        ttk.Button(
+            fila_docx,
+            text="Seleccionar Excel para Anexo 5",
+            command=self._seleccionar_excel_anexo5,
+        ).pack(side="left")
+        self._var_periodo_anexo5 = tk.StringVar(value="Seleccione un Excel")
+        ttk.Label(fila_docx, text="Período:").pack(side="left", padx=(12, 4))
+        self._combo_periodo_anexo5 = ttk.Combobox(
+            fila_docx,
+            textvariable=self._var_periodo_anexo5,
+            values=["Seleccione un Excel"],
+            state="readonly",
+            width=20,
+        )
+        self._combo_periodo_anexo5.pack(side="left")
+        self._combo_periodo_anexo5.bind("<<ComboboxSelected>>", self._cambio_periodo_anexo5)
+        ttk.Button(
+            fila_docx,
+            text="Vista previa Anexo 5",
+            command=self._previsualizar_anexo5,
+        ).pack(side="left", padx=(8, 0))
+        self._boton_generar_anexo5 = ttk.Button(
+            fila_docx,
+            text="Generar Anexo 5",
+            command=self._generar_anexo5,
+            state="disabled",
+        )
+        self._boton_generar_anexo5.pack(side="left", padx=(8, 0))
+        self._boton_abrir_anexo5 = ttk.Button(
+            fila_docx,
+            text="Abrir Anexo 5",
+            command=self._abrir_anexo5,
+            state="disabled",
+        )
+        self._boton_abrir_anexo5.pack(side="left", padx=(8, 0))
+        self._ruta_excel_anexo5: Path | None = None
+        self._datos_anexo5 = None
+        self._estadisticas_anexo5 = None
+        self._ruta_anexo5_generado: Path | None = None
+        self._var_archivo_anexo5 = tk.StringVar(value="Sin Excel seleccionado")
+        ttk.Label(
+            self._tab_reportes,
+            textvariable=self._var_archivo_anexo5,
+            foreground=COLOR_TEXTO_SECUNDARIO,
+            background=COLOR_FONDO,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 4))
+
         self._texto_reporte = tk.Text(
             self._tab_reportes,
             font=("Consolas", 10),
@@ -3368,6 +3418,196 @@ class AplicacionTk(tk.Tk):
             return
         try:
             _abrir(self._reporte["xlsx"])
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("No se pudo abrir", str(exc))
+
+    def _seleccionar_excel_anexo5(self) -> None:
+        if self._ocupado:
+            return
+        ruta = filedialog.askopenfilename(
+            title="Seleccione el Excel procesado para el Anexo 5",
+            initialdir=str(cfg.OUTPUT_DIR if cfg.OUTPUT_DIR.exists() else cfg.BASE_DIR),
+            filetypes=[("Excel procesado", "*.xlsx")],
+        )
+        if not ruta:
+            return
+        self._ruta_excel_anexo5 = Path(ruta)
+        self._datos_anexo5 = None
+        self._estadisticas_anexo5 = None
+        self._ruta_anexo5_generado = None
+        self._var_archivo_anexo5.set(str(self._ruta_excel_anexo5))
+        self._var_periodo_anexo5.set("Detectando períodos…")
+        self._combo_periodo_anexo5.configure(values=["Detectando períodos…"])
+        self._boton_generar_anexo5.configure(state="disabled")
+        self._boton_abrir_anexo5.configure(state="disabled")
+        self._cargar_previa_anexo5()
+
+    def _cargar_previa_anexo5(self) -> None:
+        if self._ocupado:
+            return
+        ruta = self._ruta_excel_anexo5
+        if ruta is None:
+            messagebox.showinfo("Seleccione un Excel", "Seleccione el Excel procesado que alimentará el Anexo 5.")
+            return
+        periodo_texto = self._var_periodo_anexo5.get()
+        self._iniciar_ocupado("Leyendo Excel para Anexo 5…")
+
+        def tarea() -> Any:
+            from core.estadisticas_informe_docx import calcular_estadisticas_informe
+            from core.lector_informe_docx import leer_excel_informe
+
+            datos = leer_excel_informe(ruta)
+            periodo = None
+            if periodo_texto not in {"Todos los datos / período indeterminado", "Detectando períodos…", "Seleccione un Excel"}:
+                anio, mes = periodo_texto.split("-")
+                periodo = (int(anio), int(mes))
+            estadisticas = calcular_estadisticas_informe(datos, periodo=periodo)
+            return datos, estadisticas
+
+        def fin(resultado: Any) -> None:
+            datos, estadisticas = resultado
+            self._datos_anexo5 = datos
+            self._estadisticas_anexo5 = estadisticas
+            periodos = [f"{p.anio:04d}-{p.mes:02d}" for p in datos.periodos_detectados]
+            opciones = periodos or ["Todos los datos / período indeterminado"]
+            if len(periodos) > 1:
+                opciones.insert(0, "Todos los datos / período indeterminado")
+            self._combo_periodo_anexo5.configure(values=opciones)
+            valor_actual = self._var_periodo_anexo5.get()
+            if valor_actual not in opciones:
+                self._var_periodo_anexo5.set(opciones[0])
+            self._actualizar_estado_generar_anexo5()
+            self._mostrar_previa_anexo5(self._estadisticas_anexo5)
+            self._terminar_ocupado()
+
+        self._ejecutar_hilo(tarea, fin, "vista previa Anexo 5")
+
+    def _previsualizar_anexo5(self) -> None:
+        if self._ruta_excel_anexo5 is None:
+            messagebox.showinfo("Seleccione un Excel", "Seleccione primero el Excel procesado.")
+            return
+        if self._ocupado:
+            return
+        self._cargar_previa_anexo5()
+
+    def _cambio_periodo_anexo5(self, _evento=None) -> None:
+        self._actualizar_estado_generar_anexo5()
+
+    def _actualizar_estado_generar_anexo5(self) -> None:
+        periodo = self._var_periodo_anexo5.get()
+        valido = bool(
+            self._datos_anexo5 is not None
+            and len(periodo) == 7
+            and periodo[4] == "-"
+            and periodo[:4].isdigit()
+            and periodo[5:].isdigit()
+        )
+        self._boton_generar_anexo5.configure(state="normal" if valido else "disabled")
+
+    def _mostrar_previa_anexo5(self, estadisticas: Any) -> None:
+        categorias = {fila.categoria: fila for fila in estadisticas.filas_por_categoria}
+        lineas = [
+            "VISTA PREVIA ANEXO 5",
+            "=" * 40,
+            f"Fuente: {estadisticas.ruta_fuente}",
+            f"Período: {estadisticas.periodo[0]:04d}-{estadisticas.periodo[1]:02d}" if estadisticas.periodo else "Período: indeterminado / agregado",
+            f"Filas analizadas: {estadisticas.filas_analizadas} de {estadisticas.filas_fuente}",
+            f"Incidencias: {categorias.get('Incidencia').cantidad_registros if categorias.get('Incidencia') else 0}",
+            f"Solicitudes: {categorias.get('Solicitud').cantidad_registros if categorias.get('Solicitud') else 0}",
+            f"Actividades de proyecto: {estadisticas.actividades_proyecto}",
+            f"Proyectos distintos por nombre exacto: {len(estadisticas.nombres_proyecto_distintos_exactos)}",
+            f"Horas conocidas: {sum((h for _, h in estadisticas.horas_conocidas_por_categoria), start=0)}{' (PARCIAL)' if any(f.filas_sin_horas or f.filas_con_horas_invalidas for f in estadisticas.filas_por_categoria) else ''}",
+        ]
+        lineas.extend(["", "CATEGORÍAS Y HORAS"])
+        lineas.extend(
+            f"- {fila.categoria}: {fila.cantidad_registros} filas; {fila.horas_conocidas} horas conocidas"
+            for fila in estadisticas.filas_por_categoria
+        )
+        lineas.extend(["", "ÁREAS (EXCLUYE PROYECTOS)"])
+        lineas.extend(
+            f"- {fila.area_original if fila.area_original is not None else '(SIN ÁREA)'}: {fila.total_registros} filas"
+            for fila in estadisticas.areas_sin_proyectos
+        )
+        lineas.extend(["", "HALLAZGOS Y ADVERTENCIAS"])
+        lineas.extend(f"- [{h.severidad}] {h.mensaje}" for h in estadisticas.hallazgos)
+        lineas.extend([
+            f"- {estadisticas.filas_sin_area} filas sin área se mostrarán como (SIN ÁREA).",
+            "- Los proyectos se incluyen en el detalle y se excluyen de la distribución por área.",
+            "- Las filas sin fecha se excluyen del mes seleccionado; las horas faltantes quedan vacías y los totales serán parciales.",
+        ])
+        self._texto_reporte.delete("1.0", tk.END)
+        self._texto_reporte.insert("1.0", "\n".join(lineas))
+
+    def _generar_anexo5(self) -> None:
+        if self._ocupado:
+            return
+        ruta = self._ruta_excel_anexo5
+        periodo_texto = self._var_periodo_anexo5.get()
+        if ruta is None or not (len(periodo_texto) == 7 and periodo_texto[4] == "-"):
+            messagebox.showinfo("Seleccione un período", "Seleccione un Excel y un mes identificado para el Anexo 5.")
+            return
+        anio, mes = (int(parte) for parte in periodo_texto.split("-"))
+        salida = cfg.REPORTES_DIR / f"Anexo5_{anio}_{mes:02d}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S_%f')}.docx"
+        plantilla = cfg.BASE_DIR / "plantillas" / "anexo_5_plantilla.docx"
+        self._boton_generar_anexo5.configure(state="disabled")
+        self._boton_abrir_anexo5.configure(state="disabled")
+        self._combo_periodo_anexo5.configure(state="disabled")
+        self._iniciar_ocupado("Generando Anexo 5…")
+
+        def tarea() -> Any:
+            from core.estadisticas_informe_docx import calcular_estadisticas_informe
+            from core.generador_docx import generar_anexo5_docx
+            from core.lector_informe_docx import leer_excel_informe
+            from core.proyector_anexo5_docx import preparar_contenido_anexo5
+
+            datos = leer_excel_informe(ruta)
+            estadisticas = calcular_estadisticas_informe(datos, periodo=(anio, mes))
+            contenido = preparar_contenido_anexo5(datos, estadisticas)
+            resultado = generar_anexo5_docx(
+                plantilla,
+                salida,
+                reemplazos_texto=contenido.reemplazos_texto,
+                filas_por_tabla=contenido.filas_por_tabla,
+                totales_por_tabla=contenido.totales_por_tabla,
+                series_por_grafico=contenido.series_por_grafico,
+            )
+            return resultado, estadisticas, contenido.advertencias
+
+        def fin(resultado: Any) -> None:
+            generado, estadisticas, advertencias = resultado
+            self._ruta_anexo5_generado = generado.ruta_salida
+            self._estadisticas_anexo5 = estadisticas
+            self._boton_abrir_anexo5.configure(state="normal")
+            self._combo_periodo_anexo5.configure(state="readonly")
+            self._mostrar_resultado_anexo5(estadisticas, generado.ruta_salida, advertencias)
+            self._terminar_ocupado()
+            self._actualizar_estado_generar_anexo5()
+            messagebox.showinfo("Anexo 5 generado", f"Se generó el documento Word:\n{generado.ruta_salida}")
+
+        self._ejecutar_hilo(tarea, fin, "Anexo 5 DOCX")
+
+    def _mostrar_resultado_anexo5(self, estadisticas: Any, ruta: Path, advertencias: tuple[str, ...]) -> None:
+        lineas = [
+            "ANEXO 5 GENERADO",
+            "=" * 40,
+            f"Período: {estadisticas.periodo[0]:04d}-{estadisticas.periodo[1]:02d}",
+            f"Filas incluidas: {estadisticas.filas_analizadas}",
+            f"Archivo: {ruta}",
+            "",
+            "ADVERTENCIAS",
+        ]
+        lineas.extend(f"- {advertencia}" for advertencia in advertencias)
+        if not advertencias:
+            lineas.append("- Sin advertencias.")
+        self._texto_reporte.delete("1.0", tk.END)
+        self._texto_reporte.insert("1.0", "\n".join(lineas))
+
+    def _abrir_anexo5(self) -> None:
+        if self._ruta_anexo5_generado is None:
+            messagebox.showinfo("Sin Anexo 5", "Genere primero el documento Word.")
+            return
+        try:
+            _abrir(self._ruta_anexo5_generado)
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("No se pudo abrir", str(exc))
 
@@ -3652,6 +3892,9 @@ class AplicacionTk(tk.Tk):
                 elif tipo == "error":
                     descripcion, exc = contenido
                     self._terminar_ocupado()
+                    if hasattr(self, "_boton_generar_anexo5"):
+                        self._combo_periodo_anexo5.configure(state="readonly")
+                        self._actualizar_estado_generar_anexo5()
                     panel = getattr(self, "_panel_principal", None)
                     if panel is not None:
                         panel.set_estado_sistema("REVISAR EJECUCIÓN", "danger")

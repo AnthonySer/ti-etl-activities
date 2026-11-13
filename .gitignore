@@ -26,7 +26,8 @@ logs/*
 *.bak
 
 # Documentos
-docs
+docs/*
+!docs/ESTADO_ACTUAL_PROYECTO.md
 
 
 # Configuracion local del editor / sistema
