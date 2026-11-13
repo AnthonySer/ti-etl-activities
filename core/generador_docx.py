@@ -25,7 +25,10 @@ from core.actualizador_tablas_docx import (
     ENCABEZADOS_TABLA,
     actualizar_tablas_docx,
 )
-from core.actualizador_textos_docx import reemplazar_marcadores_docx
+from core.actualizador_textos_docx import (
+    quitar_subrayado_titulos_graficos_docx,
+    reemplazar_marcadores_docx,
+)
 
 
 class ErrorGeneracionDocx(ValueError):
@@ -90,6 +93,7 @@ def generar_anexo5_docx(
         shutil.copy2(origen, temporal)
         documento = Document(temporal)
         reemplazar_marcadores_docx(documento, reemplazos_texto, exigir_todos=True)
+        quitar_subrayado_titulos_graficos_docx(documento)
         actualizar_tablas_docx(documento, filas_por_tabla, totales_por_tabla)
         documento.save(temporal)
         resultado = actualizar_graficos_docx(temporal, destino, series_por_grafico)

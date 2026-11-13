@@ -167,6 +167,7 @@ def preparar_contenido_anexo5(
         horas_resumen += " horas"
     reemplazos = {
         "agosto 2026": periodo_texto,
+        "agosto de 2026": f"{_MESES[mes - 1]} de {anio}",
         "479.5 horas": horas_resumen,
         "9 proyectos": f"{proyectos_distintos} proyectos",
         "129 tickets": f"{total_ticket_rows} tickets",

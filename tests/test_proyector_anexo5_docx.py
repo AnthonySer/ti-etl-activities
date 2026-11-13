@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from zipfile import ZipFile
 
 from docx import Document
 from openpyxl import Workbook
@@ -56,7 +57,7 @@ def crear_excel(ruta: Path, registros):
 
 
 class TestProyectorAnexo5Docx(unittest.TestCase):
-    def test_real_septiembre_incluye_las_22_areas_y_las_179_filas(self):
+    def test_real_septiembre_incluye_las_21_areas_de_ticket_y_las_179_filas(self):
         if not EXCEL_REAL.is_file():
             self.skipTest("No está disponible el Excel procesado de septiembre.")
         datos = leer_excel_informe(EXCEL_REAL)
@@ -64,10 +65,11 @@ class TestProyectorAnexo5Docx(unittest.TestCase):
         contenido = preparar_contenido_anexo5(datos, stats)
 
         self.assertEqual(stats.filas_analizadas, 179)
-        self.assertEqual(len(contenido.filas_por_tabla["areas"]), 22)
+        self.assertEqual(len(contenido.filas_por_tabla["areas"]), 21)
         self.assertEqual(len(contenido.filas_por_tabla["detalle"]), 179)
         self.assertEqual(len(contenido.filas_por_tabla["proyectos"]), 7)
-        self.assertEqual(len(contenido.series_por_grafico[4].categorias), 22)
+        self.assertEqual(len(contenido.series_por_grafico[4].categorias), 21)
+        self.assertEqual(sum(int(fila[1]) for fila in contenido.filas_por_tabla["areas"]), 145)
         self.assertEqual(contenido.reemplazos_texto["9 proyectos"], "7 proyectos")
         self.assertEqual(contenido.reemplazos_texto["129 tickets"], "145 tickets")
         self.assertEqual(contenido.reemplazos_texto["479.5 horas"], "426.75 horas")
@@ -131,7 +133,12 @@ class TestProyectorAnexo5Docx(unittest.TestCase):
             tablas = localizar_tablas_docx(doc)
             self.assertEqual(len(doc.inline_shapes), 4)
             self.assertEqual(len(doc.tables), 5)
-            self.assertEqual(len(tablas["areas"].rows), 24)
+            for titulo in ("Atenciones por Proyectos", "Tickets por Tipo de Actividad", "Tickets por Área"):
+                parrafo = next(p for p in doc.paragraphs if p.text.strip() == titulo)
+                self.assertTrue(parrafo.runs)
+                self.assertTrue(all(run.font.underline is False for run in parrafo.runs))
+                self.assertTrue(all(run.bold is True for run in parrafo.runs))
+            self.assertEqual(len(tablas["areas"].rows), 23)
             self.assertEqual(len(tablas["detalle"].rows), 180)
             resumen_horas = {fila.cells[0].text: fila.cells[1].text for fila in tablas["resumen_tipo_atencion"].rows[1:]}
             self.assertEqual(resumen_horas["Incidencia"], "148.5")
@@ -145,9 +152,17 @@ class TestProyectorAnexo5Docx(unittest.TestCase):
             self.assertEqual(tablas["areas"].rows[-1].cells[1].text, "145")
             texto = "\n".join(parrafo.text for parrafo in doc.paragraphs)
             self.assertNotIn("agosto 2026", texto)
+            self.assertNotIn("agosto de 2026", texto)
             self.assertNotIn("479.5 horas", texto)
             self.assertNotIn("9 proyectos", texto)
             self.assertNotIn("129 tickets", texto)
+            with ZipFile(salida) as paquete:
+                textos_xml = [
+                    paquete.read(nombre).decode("utf-8", errors="ignore").casefold()
+                    for nombre in paquete.namelist()
+                    if nombre.endswith((".xml", ".rels"))
+                ]
+            self.assertFalse(any("agosto" in texto_xml for texto_xml in textos_xml))
 
 
 if __name__ == "__main__":

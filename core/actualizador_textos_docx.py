@@ -13,6 +13,13 @@ class ErrorMarcadorDocx(ValueError):
     """Falta un marcador requerido o el reemplazo es ambiguo."""
 
 
+TITULOS_GRAFICOS_SIN_SUBRAYADO = (
+    "Atenciones por Proyectos",
+    "Tickets por Tipo de Actividad",
+    "Tickets por Área",
+)
+
+
 def _parrafos_contenedor(contenedor):
     yield from contenedor.paragraphs
     for tabla in contenedor.tables:
@@ -122,3 +129,28 @@ def reemplazar_marcadores_docx(
             "No se encontraron los marcadores requeridos: " + ", ".join(faltantes)
         )
     return conteos
+
+
+def quitar_subrayado_titulos_graficos_docx(documento: DocumentType) -> tuple[str, ...]:
+    """Quita el subrayado directo de los tres títulos acordados.
+
+    Solo cambia la propiedad de subrayado de los runs de esos párrafos; conserva
+    fuente, tamaño, color, negrita, resaltado y estructura del documento.
+    """
+
+    quitados: list[str] = []
+    titulos = set(TITULOS_GRAFICOS_SIN_SUBRAYADO)
+    for parrafo in iterar_parrafos(documento):
+        titulo = parrafo.text.strip()
+        if titulo not in titulos:
+            continue
+        for run in parrafo.runs:
+            run.font.underline = False
+        quitados.append(titulo)
+    faltantes = titulos - set(quitados)
+    if faltantes:
+        raise ErrorMarcadorDocx(
+            "No se encontraron los títulos de gráfico esperados: "
+            + ", ".join(sorted(faltantes))
+        )
+    return tuple(quitados)
