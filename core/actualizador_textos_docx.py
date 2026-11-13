@@ -19,6 +19,13 @@ TITULOS_GRAFICOS_SIN_SUBRAYADO = (
     "Tickets por Área",
 )
 
+# Marcadores con etiquetas especiales que no requieren reemplazo completo
+MARCADORES_ETIQUETADOS_PASIVOS = (
+    "#TAG_1",
+    "#TAG_2",
+    "#PROYECTO_X",
+)
+
 
 def _parrafos_contenedor(contenedor):
     yield from contenedor.paragraphs
@@ -109,7 +116,8 @@ def reemplazar_marcadores_docx(
     if any(not marcador for marcador in reemplazos):
         raise ErrorMarcadorDocx("Los marcadores de origen no pueden estar vacíos.")
     for marcador, valor in reemplazos.items():
-        if marcador in str(valor):
+        nuevo = str(valor)
+        if marcador != nuevo and marcador in nuevo:
             raise ErrorMarcadorDocx(
                 f"El reemplazo de '{marcador}' vuelve a contener el marcador original."
             )
@@ -118,11 +126,17 @@ def reemplazar_marcadores_docx(
     parrafos = tuple(iterar_parrafos(documento))
     for marcador in sorted(reemplazos, key=len, reverse=True):
         nuevo = str(reemplazos[marcador])
+        if marcador == nuevo:
+            # Un periodo idéntico es válido. Se cuenta como encontrado para
+            # mantener la validación de marcadores obligatorios, sin mutar runs.
+            conteos[marcador] = sum(
+                "".join(run.text for run in parrafo.runs).count(marcador)
+                for parrafo in parrafos
+            )
+            continue
         for parrafo in parrafos:
             while _reemplazar_primera_coincidencia(parrafo, marcador, nuevo):
                 conteos[marcador] += 1
-                if marcador == nuevo:
-                    break
     faltantes = [marcador for marcador, cantidad in conteos.items() if cantidad == 0]
     if exigir_todos and faltantes:
         raise ErrorMarcadorDocx(
