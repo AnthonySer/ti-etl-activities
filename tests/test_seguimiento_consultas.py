@@ -311,10 +311,15 @@ class PruebasVentanasTk(unittest.TestCase):
             self.assertIn(
                 "%CARLOS%JUAN%PEREZ%", ventana._var_patron.get()
             )
+            ventana._lista.selection_clear(0, "end")
+            ventana._lista.selection_set(2)
+            ventana._alternar_termino()
+            self.assertIn("%CARLOS%JUAN%", ventana._var_patron.get())
             ventana._restaurar()
             self.assertEqual(
                 ventana._terminos, ["JUAN", "CARLOS", "PEREZ"]
             )
+            self.assertIn("%JUAN%CARLOS%PEREZ%", ventana._var_patron.get())
             self.assertIn(
                 "%JUAN%CARLOS%PEREZ%", ventana._var_patron.get()
             )
@@ -327,6 +332,16 @@ class PruebasVentanasTk(unittest.TestCase):
                 ventana.destroy()
             except Exception:  # noqa: BLE001
                 pass
+
+    def test_plan_acepta_excluir_terminos_sin_inventarlos(self) -> None:
+        from core import busqueda_solicitantes as busqueda
+
+        plan = busqueda.plan_busqueda("Juan Carlos Perez Amoros")
+        modificado = plan.con_orden(["PEREZ", "AMOROS", "JUAN"])
+        self.assertEqual(modificado.terminos, ("PEREZ", "AMOROS", "JUAN"))
+        self.assertEqual(modificado.patron, "%PEREZ%AMOROS%JUAN%")
+        with self.assertRaises(ValueError):
+            plan.con_orden(["PEREZ", "DESCONOCIDO"])
 
 
 if __name__ == "__main__":

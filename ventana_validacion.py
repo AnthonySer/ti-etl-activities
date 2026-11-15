@@ -73,6 +73,25 @@ def _texto(valor: Any) -> str:
     return "" if valor is None else str(valor)
 
 
+def filtrar_areas(areas: Iterable[str], texto: str = "") -> list[str]:
+    """Deduplica y filtra áreas del maestro con coincidencia parcial."""
+
+    unicas: dict[str, str] = {}
+    for area in areas:
+        nombre = str(area or "").strip()
+        if nombre:
+            unicas.setdefault(nombre.casefold(), nombre)
+    consulta = str(texto or "").strip().casefold()
+    return sorted(
+        (
+            nombre
+            for clave, nombre in unicas.items()
+            if not consulta or clave.startswith(consulta)
+        ),
+        key=str.casefold,
+    )
+
+
 class VentanaValidacion(tk.Toplevel):
     """Revisión asistida de usuarios y áreas antes de generar el Excel."""
 
@@ -793,10 +812,57 @@ class VentanaValidacion(tk.Toplevel):
                     ventana.finalizar(resumen=resumen, mensaje=mensaje)
             except tk.TclError:
                 pass
-            # La subventana se abre desde el hilo principal, nunca desde el
-            # trabajador. Si hay una sola coincidencia ambigua, se ofrece de
-            # inmediato la selección manual.
-            if not cancelada and len(registros) == 1 and len(ambiguos) == 1:
+            # En una búsqueda individual, si la revisión ya se persistió y
+            # quedó asignada, liberar únicamente la ventana de seguimiento.
+            # Las búsquedas por lote conservan el resumen visible.
+            if (
+                not cancelada
+                and len(registros) == 1
+                and asignados == 1
+                and not ambiguos
+            ):
+                try:
+                    ventana.cerrar_tras_asignacion()
+                except tk.TclError:
+                    pass
+            # Una sola coincidencia con área disponible pero no asignada
+            # (por ejemplo, empleado inactivo) requiere confirmación explícita.
+            if not cancelada and len(registros) == 1 and asignados == 0 and not ambiguos:
+                registro = registros[0]
+                clave = normalizar_nombre(registro.get("usuario"))
+                resolucion = resoluciones.get(clave) or resoluciones.get(
+                    str(registro.get("clave") or "")
+                )
+                if resolucion and resolucion.caso != CASO_B and not resolucion.conflicto:
+                    candidato = resolucion.empleado_dict()
+                    if not candidato and resolucion.candidatos:
+                        candidato = resolucion.candidatos[0].como_dict()
+                    if candidato:
+                        area_propuesta = (
+                            resolucion.area
+                            or candidato.get("DEPARTAMENTO")
+                            or candidato.get("departamento")
+                            or candidato.get("PUESTO")
+                            or candidato.get("puesto")
+                            or ""
+                        )
+                        VentanaConfirmarAsignacionArea(
+                            self,
+                            usuario=str(registro.get("usuario") or ""),
+                            candidato=candidato,
+                            area=str(area_propuesta or "Área no disponible"),
+                            area_sql=str(area_propuesta or ""),
+                            area_maestro=str(
+                                self.maestro.buscar(registro.get("usuario")) or ""
+                            ),
+                            motivo=resolucion.motivo,
+                            inactivo=resolucion.estado == ESTADO_INACTIVO,
+                            al_confirmar=lambda: self._confirmar_y_cerrar_seguimiento(
+                                ventana, registro, candidato, resolucion
+                            ),
+                        )
+            # Una coincidencia ambigua se resuelve mediante selección manual.
+            elif not cancelada and len(registros) == 1 and len(ambiguos) == 1:
                 self.after(10, lambda: self._abrir_seleccion(ambiguos[0]))
             elif not cancelada and len(registros) == 1 and not resumen.get("empleados", 0):
                 self.after(10, lambda: self._abrir_seleccion(registros[0]))
@@ -817,6 +883,24 @@ class VentanaValidacion(tk.Toplevel):
         return asignada
 
         self._ejecutar(tarea, terminar)
+
+    def _confirmar_o_pedir_area(
+        self, registro: dict[str, Any], candidato: dict[str, Any], resolucion: Any
+    ) -> bool:
+        if resolucion.asignable and resolucion.area:
+            return bool(self._elegir_candidato(
+                registro,
+                candidato,
+                permitir_inactivo=True,
+                confirmacion_previa=True,
+            ))
+        VentanaAsignarArea(
+            self,
+            usuario=str(registro.get("usuario") or ""),
+            areas=self._areas_disponibles(),
+            al_guardar=lambda area: self._aplicar_asignacion(registro, area),
+        )
+        return True
 
     def _asignar_area(self) -> None:
         registro = self._un_registro()
@@ -995,12 +1079,17 @@ class VentanaValidacion(tk.Toplevel):
         origen: str,
         *,
         detalle: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         if self._al_asignar is not None:
             try:
                 self._al_asignar(usuario, area, origen)
             except Exception as exc:  # noqa: BLE001
                 LOGGER.error("No se pudo persistir la asignación: %s", exc)
+                messagebox.showerror(
+                    "No se pudo guardar el área",
+                    f"La asignación de '{usuario}' no se guardó: {exc}",
+                )
+                return False
         try:
             procedencia.registrar(
                 usuario,
@@ -1011,6 +1100,7 @@ class VentanaValidacion(tk.Toplevel):
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.error("No se pudo registrar la procedencia: %s", exc)
+        return True
 
     def _revisar_coincidencias(self) -> None:
         registro = self._un_registro()
@@ -1060,42 +1150,90 @@ class VentanaValidacion(tk.Toplevel):
             usuario=usuario,
             candidatos=candidatos,
             al_elegir=lambda candidato: self._elegir_candidato(registro, candidato),
+            al_asignar_inactivo=lambda candidato: self._elegir_candidato(
+                registro, candidato, permitir_inactivo=True
+            ),
             al_crear_area=lambda candidato: self._crear_area_desde_coincidencia(
                 registro, candidato
             ),
         )
 
     def _elegir_candidato(
-        self, registro: dict[str, Any], candidato: dict[str, Any]
-    ) -> None:
+        self,
+        registro: dict[str, Any],
+        candidato: dict[str, Any],
+        *,
+        permitir_inactivo: bool = False,
+        confirmacion_previa: bool = False,
+    ) -> bool:
         """Resuelve el área usando exclusivamente el registro elegido."""
 
         usuario = str(registro.get("usuario") or "")
         resolver = ResolverAreas(cargar_empleados(), maestro=self.maestro)
+        origen_candidato = str(
+            candidato.get("origen") or candidato.get("ORIGEN") or ""
+        ).strip().upper()
+        if origen_candidato == "MAESTRO":
+            area_maestro = str(
+                candidato.get("AREA_MAESTRO")
+                or candidato.get("area")
+                or candidato.get("AREA")
+                or ""
+            ).strip()
+            if not area_maestro:
+                messagebox.showwarning(
+                    "Área no disponible",
+                    "El registro del Excel maestro no contiene un área.",
+                )
+                return False
+            if not confirmacion_previa and not self._confirmar_asignacion_candidato(
+                usuario, candidato, area_maestro
+            ):
+                return False
+            if not self._asignar_en_maestro(
+                usuario,
+                area_maestro,
+                procedencia.MANUAL,
+                detalle=sel.registro_trazable(
+                    candidato, area=area_maestro, tipo_resolucion="manual"
+                ),
+            ):
+                return False
+            self.revision.registrar_seleccion(
+                usuario,
+                candidato,
+                area=area_maestro,
+                estado=ESTADO_VALIDADO,
+                motivo="Área seleccionada del Excel maestro.",
+                tipo_resolucion="manual",
+                origen="MAESTRO",
+            )
+            self.revision.guardar()
+            self._refrescar()
+            self._var_resumen.set(
+                f"{usuario}: área del Excel maestro asignada → {area_maestro}."
+            )
+            return True
         resolucion = resolver.resolver_candidato(usuario, candidato)
-        area = resolucion.area if resolucion.caso == CASO_A and resolucion.asignable else ""
+        puede_asignar = resolucion.caso == CASO_A or (
+            permitir_inactivo and resolucion.estado == ESTADO_INACTIVO
+        )
+        area = resolucion.area if puede_asignar and resolucion.asignable else ""
         estado = ESTADO_VALIDADO if area else resolucion.estado
-        if area and not self._confirmar_asignacion_candidato(
+        if area and not confirmacion_previa and not self._confirmar_asignacion_candidato(
             usuario, candidato, area
         ):
-            return
-        self.revision.registrar_seleccion(
-            usuario,
-            candidato,
-            area=area,
-            estado=estado,
-            motivo=resolucion.motivo,
-            tipo_resolucion="manual",
-        )
+            return False
         if area:
-            self._asignar_en_maestro(
+            if not self._asignar_en_maestro(
                 usuario,
                 area,
                 procedencia.MANUAL,
                 detalle=sel.registro_trazable(
                     candidato, area=area, tipo_resolucion="manual"
                 ),
-            )
+            ):
+                return False
             mensaje = (
                 f"{usuario}: seleccionado {sel.valor(candidato, 'empresa')} / "
                 f"{sel.valor(candidato, 'fuente')} → área {area}."
@@ -1106,9 +1244,18 @@ class VentanaValidacion(tk.Toplevel):
                 f"{resolucion.motivo}"
             )
             messagebox.showwarning("Selección sin área", mensaje)
+        self.revision.registrar_seleccion(
+            usuario,
+            candidato,
+            area=area,
+            estado=estado,
+            motivo=resolucion.motivo,
+            tipo_resolucion="manual",
+        )
         self.revision.guardar()
         self._refrescar()
         self._var_resumen.set(mensaje)
+        return bool(area)
 
     def _validar_seleccionados(self) -> None:
         registros = self._seleccionados()
@@ -1280,21 +1427,21 @@ class VentanaValidacion(tk.Toplevel):
             pass
 
     def _areas_disponibles(self) -> list[str]:
-        areas: set[str] = set()
+        areas: list[str] = []
         try:
             df = self.maestro.como_dataframe()
             if not df.empty:
                 for valor in df[cfg.COLUMNA_AREA].tolist():
                     texto = str(valor or "").strip()
                     if texto:
-                        areas.add(texto)
+                        areas.append(texto)
         except Exception:  # noqa: BLE001
             pass
         for registro in self.revision.registros:
             texto = str(registro.get("area_actual") or "").strip()
             if texto:
-                areas.add(texto)
-        return sorted(areas, key=str.casefold)
+                areas.append(texto)
+        return filtrar_areas(areas)
 
 
 # ---------------------------------------------------------------------------
@@ -1317,6 +1464,7 @@ class VentanaAsignarArea(tk.Toplevel):
         self.transient(padre)
         self.grab_set()
         self._al_guardar = al_guardar
+        self._areas = filtrar_areas(areas)
 
         ttk.Label(
             self, text=f"Usuario: {usuario}", style="Seccion.TLabel"
@@ -1331,10 +1479,19 @@ class VentanaAsignarArea(tk.Toplevel):
         combo = ttk.Combobox(
             self,
             textvariable=self._var_area,
-            values=list(areas),
+            values=self._areas,
             width=46,
         )
         combo.pack(fill="x", padx=18, pady=10)
+        self._combo_area = combo
+        self._var_estado_sugerencias = tk.StringVar(value="")
+        ttk.Label(
+            self,
+            textvariable=self._var_estado_sugerencias,
+            style="Subtitulo.TLabel",
+        ).pack(anchor="w", padx=18)
+        combo.bind("<KeyRelease>", self._filtrar_sugerencias)
+        combo.bind("<<ComboboxSelected>>", self._seleccionar_sugerencia)
         combo.focus_set()
 
         botones = ttk.Frame(self)
@@ -1348,6 +1505,19 @@ class VentanaAsignarArea(tk.Toplevel):
         ttk.Button(botones, text="Cancelar", command=self.destroy).pack(
             side="right", padx=(0, 8)
         )
+
+    def _filtrar_sugerencias(self, _evento=None) -> None:
+        texto = self._var_area.get()
+        opciones = filtrar_areas(self._areas, texto)
+        self._combo_area.configure(values=opciones)
+        self._var_estado_sugerencias.set(
+            "No se encontraron áreas" if texto.strip() and not opciones else ""
+        )
+        if opciones and texto.strip():
+            self._combo_area.event_generate("<Down>")
+
+    def _seleccionar_sugerencia(self, _evento=None) -> None:
+        self._var_estado_sugerencias.set("")
 
     def _guardar(self) -> None:
         area = self._var_area.get().strip()
@@ -1377,6 +1547,7 @@ class VentanaOrdenTerminos(tk.Toplevel):
         self._plan = plan
         self._terminos = list(plan.terminos)
         self._originales = list(plan.terminos_originales or plan.terminos)
+        self._habilitados = set(self._originales)
         self._resultado: list[str] | None = None
         self._var_patron = tk.StringVar()
 
@@ -1393,8 +1564,8 @@ class VentanaOrdenTerminos(tk.Toplevel):
         ttk.Label(
             self,
             text=(
-                "Se detectaron tres o más palabras. Ordene los términos con los "
-                "botones ↑ / ↓ o con doble clic en la lista."
+                "Ordene con ↑ / ↓. Seleccione un término y use Incluir / "
+                "excluir para cambiar si participa en la búsqueda."
             ),
             style="Subtitulo.TLabel",
             wraplength=610,
@@ -1433,6 +1604,11 @@ class VentanaOrdenTerminos(tk.Toplevel):
         ttk.Button(controles, text="↓ Bajar", command=self._bajar).pack(
             side="left", padx=(6, 0)
         )
+        ttk.Button(
+            controles,
+            text="☑ Incluir / excluir término",
+            command=self._alternar_termino,
+        ).pack(side="left", padx=(6, 0))
         ttk.Button(
             controles,
             text="Restaurar orden original",
@@ -1528,16 +1704,41 @@ class VentanaOrdenTerminos(tk.Toplevel):
 
     def _restaurar(self) -> None:
         self._terminos = list(self._originales)
+        self._habilitados = set(self._originales)
         self._actualizar()
+
+    def _alternar_termino(self) -> None:
+        indice = self._seleccion()
+        if indice is None or not self._terminos:
+            return
+        termino = self._terminos[indice]
+        if termino in self._habilitados:
+            self._habilitados.remove(termino)
+        else:
+            self._habilitados.add(termino)
+        self._actualizar()
+        self._lista.selection_set(indice)
+        self._lista.activate(indice)
 
     def _actualizar(self) -> None:
         self._lista.delete(0, "end")
         for termino in self._terminos:
-            self._lista.insert("end", termino)
-        self._var_patron.set(busqueda_core.patron_visible(self._terminos))
+            marca = "☑" if termino in self._habilitados else "☐"
+            self._lista.insert("end", f"{marca}  {termino}")
+        seleccionados = [
+            termino for termino in self._terminos if termino in self._habilitados
+        ]
+        self._var_patron.set(busqueda_core.patron_visible(seleccionados))
 
     def _confirmar(self) -> None:
-        self._resultado = list(self._terminos)
+        self._resultado = [
+            termino for termino in self._terminos if termino in self._habilitados
+        ]
+        if not self._resultado:
+            messagebox.showwarning(
+                "Sin términos", "Incluya al menos un término para buscar."
+            )
+            return
         self.destroy()
 
     def _cancelar(self) -> None:
@@ -1952,6 +2153,21 @@ class VentanaSeguimientoConsulta(tk.Toplevel):
         self._btn_cancelar.configure(state="disabled")
         self._var_estado.set("Cancelando: esperando el cierre de la empresa actual…")
 
+    def cerrar_tras_asignacion(self) -> None:
+        """Libera solo esta ventana cuando la asignación ya fue guardada."""
+
+        if getattr(self, "_cerrada_por_asignacion", False):
+            return
+        self._cerrada_por_asignacion = True
+        self._corriendo = False
+        if self._after_id is not None:
+            try:
+                self.after_cancel(self._after_id)
+            except tk.TclError:  # pragma: no cover - ventana destruida
+                pass
+            self._after_id = None
+        self.destroy()
+
     def _cerrar(self) -> None:
         if self._corriendo and not messagebox.askyesno(
             "Cerrar seguimiento",
@@ -2197,6 +2413,74 @@ class VentanaConsultaSqlManual(tk.Toplevel):
         self.destroy()
 
 
+class VentanaConfirmarAsignacionArea(tk.Toplevel):
+    """Confirmación breve para un candidato encontrado que requiere acción."""
+
+    def __init__(
+        self,
+        padre: tk.Misc,
+        *,
+        usuario: str,
+        candidato: dict[str, Any],
+        area: str,
+        area_sql: str = "",
+        area_maestro: str = "",
+        motivo: str,
+        inactivo: bool,
+        al_confirmar: Callable[[], bool],
+    ) -> None:
+        super().__init__(padre)
+        self.title("Confirmar asignación de área")
+        self.geometry("480x300")
+        self.resizable(False, False)
+        self.configure(bg=FONDO)
+        self.transient(padre)
+        self.grab_set()
+        estado = "INACTIVO" if inactivo else str(candidato.get("ACTIVO") or "")
+        ttk.Label(
+            self,
+            text="Se encontró una coincidencia sin asignar el área",
+            style="Seccion.TLabel",
+            wraplength=440,
+        ).pack(anchor="w", padx=18, pady=(18, 10))
+        datos = (
+            ("Usuario", usuario),
+            ("Empleado", str(candidato.get("NOMBRE") or candidato.get("nombre") or "—")),
+            ("Empresa", str(candidato.get("EMPRESA") or candidato.get("empresa") or candidato.get("FUENTE") or "—")),
+            ("Área SQL", area_sql or area or "—"),
+            ("Área Excel maestro", area_maestro or "—"),
+            ("Estado", estado or "No disponible"),
+        )
+        for etiqueta, valor in datos:
+            fila = ttk.Frame(self)
+            fila.pack(fill="x", padx=18, pady=2)
+            ttk.Label(fila, text=f"{etiqueta}:", style="Clave.TLabel", width=12).pack(side="left")
+            ttk.Label(fila, text=valor, style="Subtitulo.TLabel", wraplength=330).pack(side="left")
+        nota = motivo or "¿Desea asignar esta área al usuario?"
+        if inactivo:
+            nota += " La asignación no reactivará al empleado."
+        ttk.Label(
+            self, text=nota, style="Subtitulo.TLabel", wraplength=440,
+        ).pack(anchor="w", padx=18, pady=(8, 4))
+        botones = ttk.Frame(self)
+        botones.pack(fill="x", padx=18, pady=(8, 14))
+        ttk.Button(botones, text="Cancelar", command=self.destroy).pack(side="right")
+        ttk.Button(
+            botones, text="Asignar área", style="Principal.TButton",
+            command=lambda: self._confirmar(al_confirmar),
+        ).pack(side="right", padx=(0, 8))
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    def _confirmar(self, callback: Callable[[], bool]) -> None:
+        try:
+            guardada = bool(callback())
+        except Exception as exc:  # noqa: BLE001 - conservar el diálogo ante fallo
+            messagebox.showerror("No se pudo asignar el área", str(exc), parent=self)
+            return
+        if guardada:
+            self.destroy()
+
+
 class VentanaCoincidencias(tk.Toplevel):
     """Selección manual del empleado, empresa y fuente correctos."""
 
@@ -2208,6 +2492,8 @@ class VentanaCoincidencias(tk.Toplevel):
         ("empresa", "EMPRESA", 105),
         ("fuente", "FUENTE", 110),
         ("departamento", "DEPARTAMENTO", 180),
+        ("area_sql", "ÁREA SQL", 150),
+        ("area_maestro", "ÁREA MAESTRO", 150),
         ("puesto", "PUESTO", 170),
         ("activo", "ACTIVO", 95),
         ("correo", "CORREO", 200),
@@ -2222,6 +2508,7 @@ class VentanaCoincidencias(tk.Toplevel):
         al_elegir: Callable[[dict[str, Any]], None],
         al_cancelar: Callable[[], None] | None = None,
         al_crear_area: Callable[[dict[str, Any]], None] | None = None,
+        al_asignar_inactivo: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         super().__init__(padre)
         self.title("Seleccionar empleado / empresa correcta")
@@ -2234,6 +2521,7 @@ class VentanaCoincidencias(tk.Toplevel):
         self._al_elegir = al_elegir
         self._al_cancelar = al_cancelar
         self._al_crear_area = al_crear_area
+        self._al_asignar_inactivo = al_asignar_inactivo
         self._iids: dict[str, dict[str, Any]] = {}
         self._orden = ("empleado", False)
 
@@ -2379,6 +2667,14 @@ class VentanaCoincidencias(tk.Toplevel):
         )
         if self._al_crear_area is not None:
             self._btn_crear_area.pack(side="left")
+        self._btn_asignar_inactivo = ttk.Button(
+            botones,
+            text="Asignar área aunque esté inactivo",
+            command=self._asignar_inactivo,
+            state="disabled",
+        )
+        if self._al_asignar_inactivo is not None:
+            self._btn_asignar_inactivo.pack(side="left", padx=(8, 0))
 
     # ------------------------------------------------------------------
     def _filtros(self) -> dict[str, str]:
@@ -2455,6 +2751,10 @@ class VentanaCoincidencias(tk.Toplevel):
         return (0, tipos.get(tipo, 4))
 
     def _valor_columna(self, candidato: dict[str, Any], columna: str) -> str:
+        if columna == "area_sql":
+            return str(candidato.get("AREA_SQL") or "—")
+        if columna == "area_maestro":
+            return str(candidato.get("AREA_MAESTRO") or "—")
         if columna == "tipo":
             tipo = str(candidato.get("tipo") or "").strip().lower()
             return {
@@ -2478,6 +2778,15 @@ class VentanaCoincidencias(tk.Toplevel):
         if self._al_crear_area is not None:
             self._btn_crear_area.configure(
                 state="normal" if hay_seleccion else "disabled"
+            )
+        if self._al_asignar_inactivo is not None:
+            candidato = (
+                self._iids.get(self._tabla.selection()[0])
+                if hay_seleccion else None
+            )
+            inactivo = candidato is not None and sel.valor(candidato, "activo") == "Inactivo"
+            self._btn_asignar_inactivo.configure(
+                state="normal" if inactivo else "disabled"
             )
 
     def _limpiar_filtros(self) -> None:
@@ -2517,6 +2826,16 @@ class VentanaCoincidencias(tk.Toplevel):
         if candidato is None or self._al_crear_area is None:
             return
         self._al_crear_area(dict(candidato))
+        self.destroy()
+
+    def _asignar_inactivo(self) -> None:
+        seleccion = self._tabla.selection()
+        if not seleccion or self._al_asignar_inactivo is None:
+            return
+        candidato = self._iids.get(seleccion[0])
+        if candidato is None or sel.valor(candidato, "activo") != "Inactivo":
+            return
+        self._al_asignar_inactivo(dict(candidato))
         self.destroy()
 
     def _cancelar(self) -> None:

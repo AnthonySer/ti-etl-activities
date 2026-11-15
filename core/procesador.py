@@ -176,7 +176,7 @@ def _resolver_pendientes_sql(
     pendientes: dict[str, dict[str, Any]],
     filas: list[dict[str, Any]],
     maestro: Maestro,
-    config: Any,
+    config: Any | None,
     ejecucion: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], int, int, list[dict[str, str]]]:
     """Resuelve pendientes contra SQL Server en un solo lote.
@@ -197,15 +197,21 @@ def _resolver_pendientes_sql(
 
     try:
         empleados = cargar_empleados()
-        resolver = ResolverAreas(empleados, maestro=maestro)
-        resoluciones = resolver.resolver_lote(nombres)
+    except Exception as exc:  # noqa: BLE001 - la caché no debe bloquear el ETL
+        LOGGER.warning("No se pudo cargar la caché de empleados: %s", exc)
+        empleados = []
+    resolver = ResolverAreas(empleados, maestro=maestro)
+    resoluciones = resolver.resolver_lote(nombres)
 
-        faltantes = [
-            resultado.usuario
-            for resultado in resoluciones.values()
-            if resultado.caso == "C"
-        ]
-        if faltantes:
+    # Solo se consulta SQL para nombres que no pudieron resolverse con la
+    # caché local. Una falla de SQL conserva las resoluciones ya encontradas.
+    faltantes = [
+        resultado.usuario
+        for resultado in resoluciones.values()
+        if resultado.caso == "C"
+    ]
+    if faltantes and config is not None:
+        try:
             repositorio = RepositorioEmpleados(config)
             consulta = repositorio.buscar_por_nombres(faltantes)
             errores.extend(consulta.errores)
@@ -215,10 +221,9 @@ def _resolver_pendientes_sql(
                 ).actualizar_desde_busqueda(consulta.empleados)
                 empleados = cargar_empleados()
                 resolver = ResolverAreas(empleados, maestro=maestro)
-                resoluciones = resolver.resolver_lote(nombres)
-    except Exception as exc:  # noqa: BLE001 - SQL no debe bloquear el ETL
-        LOGGER.warning("No se pudo resolver contra SQL Server: %s", exc)
-        return {}, [], 0, 0, errores
+                resoluciones.update(resolver.resolver_lote(faltantes))
+        except Exception as exc:  # noqa: BLE001 - SQL no debe bloquear el ETL
+            LOGGER.warning("No se pudo resolver contra SQL Server: %s", exc)
 
     # Índice de filas por clave de usuario (normalización del procesador).
     filas_por_clave: dict[str, list[dict[str, Any]]] = {}
@@ -251,7 +256,7 @@ def _resolver_pendientes_sql(
 
         for fila in filas_por_clave.get(clave, []):
             fila[C_AREA] = resultado.area
-            fila["_area_origen"] = "sql_server"
+            fila["_area_origen"] = resultado.origen_area or "DEPARTAMENTO"
             if fila.get("_estado") == ESTADO_PENDIENTE:
                 tiene_error = any(
                     str(observacion.get("severidad")) == "error"
@@ -315,6 +320,7 @@ def procesar_archivo(
     crear_revision: bool = False,
     crear_respaldo: bool = False,
     crear_copia_revision: bool = False,
+    asignaciones_revision: dict[str, str] | None = None,
 ) -> EstadisticasProcesamiento:
     """Procesa un Excel, asigna áreas y genera el archivo de 11 columnas.
 
@@ -333,6 +339,15 @@ def procesar_archivo(
 
     extraccion = extraer(ruta_entrada, hoja=hoja, formato_fecha=formato_fecha)
     df = extraccion.df.copy()
+
+    # Las áreas validadas en una revisión son la fuente de verdad para esa
+    # generación. No depender exclusivamente de que también hayan podido
+    # guardarse en el maestro (por ejemplo, si este estaba abierto en Excel).
+    areas_revision = {
+        clave: area
+        for usuario, area in (asignaciones_revision or {}).items()
+        if (clave := normalizar_usuario(usuario)) and limpiar_area(area)
+    }
 
     if df.empty:
         LOGGER.warning("El archivo %s no contiene registros.", ruta_entrada.name)
@@ -374,8 +389,13 @@ def procesar_archivo(
 
         if usuario_valido:
             usuarios_unicos.add(clave)
+            area_revision = areas_revision.get(clave)
             area_maestro = maestro.buscar(clave)
-            if area_maestro:
+            if area_revision:
+                fila[C_AREA] = limpiar_area(area_revision)
+                origen_area = "revision"
+                areas_asignadas += 1
+            elif area_maestro:
                 usuario_conocido = True
                 usuarios_en_maestro.add(clave)
                 fila[C_AREA] = area_maestro
@@ -494,7 +514,7 @@ def procesar_archivo(
             )
         except Exception as exc:  # noqa: BLE001 - trazabilidad no bloquea
             LOGGER.warning("No se pudo registrar la procedencia local: %s", exc)
-    if config_sql is not None and usuarios_pendientes:
+    if usuarios_pendientes:
         (
             resoluciones,
             conflictos,
@@ -582,6 +602,9 @@ def procesar_archivo(
         "Áreas preexistentes preservadas": preservadas,
         "Áreas obtenidas de SQL Server": areas_sql,
         "Conflictos de área detectados": len(conflictos),
+        "Áreas aplicadas desde revisión": sum(
+            1 for fila in filas if fila.get("_area_origen") == "revision"
+        ),
     }
 
     meta = {
@@ -675,6 +698,7 @@ def procesar_archivo(
         "asignaciones_automaticas": list(asignaciones.values()),
         "usuarios_pendientes": list(usuarios_pendientes.values()),
         "areas_preexistentes": list(preexistentes.values()),
+        "asignaciones_revision": areas_revision,
     }
 
     archivo_manifiesto: str | None = None

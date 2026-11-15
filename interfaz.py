@@ -2083,11 +2083,31 @@ class AplicacionTk(tk.Tk):
                 "un archivo original asociado.",
             )
             return False
-        self._lanzar_generacion(modo, permitir_pendientes, ventana)
+        revision = self._revision_actual
+        asignaciones_revision = {
+            str(registro.get("usuario") or ""): str(
+                registro.get("area_actual") or ""
+            ).strip()
+            for registro in (revision.registros if revision else [])
+            if revision
+            and revision.validado(registro)
+            and str(registro.get("area_actual") or "").strip()
+        }
+        self._lanzar_generacion(
+            modo,
+            permitir_pendientes,
+            ventana,
+            asignaciones_revision=asignaciones_revision,
+        )
         return True
 
     def _lanzar_generacion(
-        self, modo: str, permitir_pendientes: bool, ventana: Any = None
+        self,
+        modo: str,
+        permitir_pendientes: bool,
+        ventana: Any = None,
+        *,
+        asignaciones_revision: dict[str, str] | None = None,
     ) -> None:
         ruta = Path(self._ruta_entrada_actual)
         hoja = self._hoja_entrada_actual
@@ -2110,6 +2130,7 @@ class AplicacionTk(tk.Tk):
                         modo=modo,
                         permitir_pendientes=permitir_pendientes,
                         crear_revision=False,
+                        asignaciones_revision=asignaciones_revision,
                     )
                 return True, estadisticas
             except Exception as exc:  # noqa: BLE001
