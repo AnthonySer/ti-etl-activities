@@ -1,7 +1,9 @@
 """Repositorio de empleados y catálogos corporativos.
 
-Cada empresa (esquema) se consulta de forma independiente: si una falla, las
-demás continúan y el error se informa sin bloquear el procesamiento.
+La búsqueda principal usa una sentencia parametrizada ``UNION ALL`` tras
+inspeccionar los metadatos. Las lecturas por empresa se limitan a enriquecer
+los códigos encontrados; obtener/sincronizar catálogos conserva el recorrido
+adaptativo existente.
 
 Antes de construir el ``SELECT`` se leen las columnas reales del esquema. Así
 una empresa sin ``U_CORREO_CORP``, sin ``PUESTO`` o con una tabla mínima no
@@ -25,7 +27,7 @@ from database.connection import (
     conectar,
     ejecutar_consulta,
 )
-from database.normalizador import normalizar_nombre
+from database.normalizador import claves_empleado, normalizar_nombre
 
 LOGGER = logging.getLogger("automatizador")
 
@@ -76,6 +78,7 @@ class Empleado:
     email: str = ""
     correo_corp: str = ""
     fuente: str = ""
+    esquema_origen: str = ""
     base_datos: str = ""
     esquema: str = ""
     tabla: str = ""
@@ -137,6 +140,7 @@ class Empleado:
             "E_MAIL": self.email,
             "U_CORREO_CORP": self.correo_corp,
             "FUENTE": self.fuente or self.tabla,
+            "ESQUEMA_ORIGEN": self.esquema_origen,
             "BASE_DATOS": self.base_datos,
             "ESQUEMA": self.esquema or self.empresa,
             "TABLA": self.tabla,
@@ -181,6 +185,7 @@ class Empleado:
             email=_texto(fila.get("E_MAIL")),
             correo_corp=_texto(fila.get("U_CORREO_CORP")),
             fuente=_texto(fila.get("FUENTE")) or "EMPLEADO",
+            esquema_origen=_texto(fila.get("ESQUEMA_ORIGEN")),
             base_datos=_texto(fila.get("BASE_DATOS")),
             esquema=_texto(fila.get("ESQUEMA")) or empresa,
             tabla=_texto(fila.get("TABLA")) or "EMPLEADO",
@@ -217,6 +222,7 @@ class Empleado:
             email=_texto(valor("E_MAIL")),
             correo_corp=_texto(valor("U_CORREO_CORP")),
             fuente=_texto(valor("FUENTE", "fuente", "TABLA", "tabla")) or "EMPLEADO",
+            esquema_origen=_texto(valor("ESQUEMA_ORIGEN")),
             base_datos=_texto(valor("BASE_DATOS")),
             esquema=_texto(valor("ESQUEMA")) or _texto(valor("EMPRESA", "empresa")),
             tabla=_texto(valor("TABLA", "tabla")) or "EMPLEADO",
@@ -303,6 +309,307 @@ class RepositorioEmpleados:
         self._fabrica = fabrica_conexion or conectar
         self._ejecutor = ejecutor or ejecutar_consulta
         self._capacidades: dict[str, dict[str, Any]] = {}
+        self._capacidades_consolidadas: dict[str, dict[str, Any]] | None = None
+        self._cache_departamentos: dict[tuple[str, str], dict[str, Any] | None] = {}
+
+    def _obtener_departamento(
+        self, empresa: str, codigo: str, capacidades: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """Consulta descripción del departamento con caché por fuente y código."""
+
+        codigo = _texto(codigo)
+        if not codigo:
+            return None
+        llave = (empresa, codigo)
+        if llave in self._cache_departamentos:
+            return self._cache_departamentos[llave]
+        if empresa == "SERVIAM":
+            sql, parametros = queries.sql_departamentos_serviam(codigo)
+        else:
+            sql, parametros = queries.sql_departamento_exactus(
+                base_datos=self.config.base_datos,
+                esquema=empresa,
+                codigo=codigo,
+                columnas_disponibles=capacidades,
+            )
+        with self._fabrica(self.config) as conexion:
+            filas = self._ejecutor(conexion, sql, parametros)
+        resultado = next(
+            (dict(fila) for fila in filas
+             if _texto(fila.get("DEPARTAMENTO")) == codigo),
+            None,
+        )
+        self._cache_departamentos[llave] = resultado
+        return resultado
+
+    def _leer_capacidades_consolidadas(self) -> dict[str, dict[str, Any]]:
+        """Obtiene metadatos de las 18 empresas mediante una sola lectura."""
+
+        if self._capacidades_consolidadas is not None:
+            return self._capacidades_consolidadas
+        sql, parametros = queries.sql_columnas_multiempresa(self.config.base_datos)
+        with self._fabrica(self.config) as conexion:
+            filas = self._ejecutor(conexion, sql, parametros)
+        capacidades: dict[str, dict[str, Any]] = {}
+        for fila in filas:
+            empresa = str(fila.get("EMPRESA") or fila.get("TABLE_SCHEMA") or "").upper()
+            tabla = str(fila.get("TABLE_NAME") or "").upper()
+            columna = str(fila.get("COLUMN_NAME") or "").upper()
+            if empresa in EMPRESAS and tabla and columna:
+                capacidades.setdefault(empresa, {}).setdefault(tabla, set()).add(columna)
+        self._capacidades_consolidadas = capacidades
+        return capacidades
+
+    def _buscar_consolidado(
+        self,
+        consultas: Sequence[Mapping[str, Any]],
+        *,
+        al_progreso: Callable[[dict[str, Any]], None] | None = None,
+        debe_cancelar: Callable[[], bool] | None = None,
+    ) -> ResultadoConsulta:
+        """Busca una vez con UNION ALL y luego enriquece solo los hits."""
+
+        resultado = ResultadoConsulta()
+        inicio_total = time.perf_counter()
+        patrones = list(dict.fromkeys(str(item.get("patron") or "") for item in consultas))
+        patrones = [patron for patron in patrones if patron]
+        if not patrones:
+            return resultado
+
+        try:
+            capacidades = self._leer_capacidades_consolidadas()
+        except Exception as exc:  # noqa: BLE001 - consulta principal indivisible
+            error = _clasificar_error_consulta(exc, "EXACTUS")
+            resultado.errores.append(error)
+            for empresa in EMPRESAS:
+                _avisar(al_progreso, seguimiento.nuevo_evento(
+                    empresa, seguimiento.estado_desde_error(error["categoria"]),
+                    resultados=0, detalle=error["mensaje"],
+                ))
+            return resultado
+
+        for empresa in EMPRESAS:
+            _avisar(al_progreso, seguimiento.nuevo_evento(
+                empresa, seguimiento.ESTADO_CONSULTANDO,
+                detalle="Incluida en la búsqueda consolidada UNION ALL…",
+            ))
+
+        disponibles: list[str] = []
+        for empresa in EMPRESAS:
+            columnas = capacidades.get(empresa, {})
+            empleado = columnas.get(queries.TABLA_EMPLEADO, set())
+            columnas_nombre = {
+                "NOMBRE", "NOMBRE_PILA", "PRIMER_APELLIDO", "SEGUNDO_APELLIDO"
+            } & empleado
+            if "EMPLEADO" in empleado and columnas_nombre:
+                disponibles.append(empresa)
+            else:
+                resultado.empresas_sin_esquema.append(empresa)
+                resultado.errores.append({
+                    "empresa": empresa,
+                    "categoria": "campos_insuficientes",
+                    "mensaje": "No se encontró EMPLEADO con código y al menos una columna de nombre verificada; se omitió del UNION ALL.",
+                })
+                _avisar(al_progreso, seguimiento.nuevo_evento(
+                    empresa, seguimiento.ESTADO_SIN_ESQUEMA, resultados=0,
+                    detalle="No tiene las columnas necesarias para la búsqueda consolidada.",
+                ))
+        if not disponibles:
+            return resultado
+
+        # Una sola búsqueda principal. Los metadatos no consultan ni buscan
+        # empleados; las consultas por empresa posteriores se restringen a IDs.
+        _avisar(al_progreso, seguimiento.nuevo_evento(
+            "UNION ALL", seguimiento.ESTADO_CONSULTANDO,
+            detalle=f"Buscando en {len(disponibles)} empresas…",
+        ))
+        try:
+            filas_principales: list[dict[str, Any]] = []
+            # SQL Server limita los parámetros posicionales por sentencia.
+            # Cada patrón se repite por rama; 100 * 18 queda debajo de 2100.
+            tamano_lote = max(1, min(int(self.config.lote), 100))
+            for inicio in range(0, len(patrones), tamano_lote):
+                if _cancelado(debe_cancelar):
+                    resultado.cancelada = True
+                    break
+                patrones_lote = patrones[inicio : inicio + tamano_lote]
+                sql, params = queries.sql_busqueda_consolidada(
+                    base_datos=self.config.base_datos,
+                    patrones=patrones_lote,
+                    empresas=disponibles,
+                    columnas_por_empresa=capacidades,
+                )
+                with self._fabrica(self.config) as conexion:
+                    filas_principales.extend(self._ejecutor(conexion, sql, params))
+        except Exception as exc:  # noqa: BLE001 - fallo del mecanismo principal
+            error = _clasificar_error_consulta(exc, "UNION ALL")
+            resultado.errores.append(error)
+            _avisar(al_progreso, seguimiento.nuevo_evento(
+                "UNION ALL", seguimiento.estado_desde_error(error["categoria"]),
+                resultados=0, detalle=error["mensaje"],
+            ))
+            for empresa in disponibles:
+                _avisar(al_progreso, seguimiento.nuevo_evento(
+                    empresa, seguimiento.estado_desde_error(error["categoria"]),
+                    resultados=0, detalle=error["mensaje"],
+                ))
+            return resultado
+        if resultado.cancelada:
+            for empresa in EMPRESAS:
+                _avisar(al_progreso, seguimiento.nuevo_evento(
+                    empresa, seguimiento.ESTADO_CANCELADA, resultados=0,
+                    detalle="La búsqueda consolidada fue cancelada.",
+                ))
+            return resultado
+
+        hits: dict[str, dict[str, dict[str, Any]]] = {empresa: {} for empresa in disponibles}
+        for fila in filas_principales:
+            empresa = str(fila.get("FUENTE") or "").strip().upper()
+            if empresa not in hits:
+                continue
+            codigo = _texto(fila.get("EMPLEADO") or fila.get("CODIGO_EMPLEADO"))
+            nombre = _texto(fila.get("NOMBRE"))
+            if not codigo:
+                continue
+            registro = {"EMPLEADO": codigo, "NOMBRE": nombre, "FUENTE": empresa}
+            hits[empresa].setdefault(codigo, registro)
+        # Asociar las filas a cada plan por su patrón y conservar candidatos
+        # distintos de todas las empresas (incluidos códigos repetidos).
+        candidatos_por_clave: dict[str, list[Empleado]] = {str(item.get("clave") or ""): [] for item in consultas}
+        detalles_por_empresa: dict[str, dict[str, dict[str, Any]]] = {}
+        for empresa, por_codigo in hits.items():
+            if not por_codigo:
+                continue
+            try:
+                capacidad = capacidades[empresa]
+                patrones_codigo = list(por_codigo)
+                if empresa == "SERVIAM":
+                    # La vista MDA aporta campos de nombre y datos laborales;
+                    # el código y FUENTE vienen del hit primario EXACTUS.
+                    criterios_detalle: list[tuple[str, list[str]]] = []
+                    for base in por_codigo.values():
+                        plan = next((consulta for consulta in consultas
+                                     if busqueda.coincide_terminos(
+                                         base.get("NOMBRE"), consulta.get("terminos") or []
+                                     )), None)
+                        criterios_detalle.append((
+                            str(base.get("NOMBRE") or ""),
+                            list((plan or {}).get("terminos") or []),
+                        ))
+                    detalles: dict[str, dict[str, Any]] = {}
+                    if criterios_detalle:
+                        sql_detalle, params_detalle = queries.sql_empleados_serviam_estructurada(
+                            criterios_detalle
+                        )
+                        with self._fabrica(self.config) as conexion:
+                            filas_detalle = self._ejecutor(conexion, sql_detalle, params_detalle)
+                        for fila_detalle in filas_detalle:
+                            claves_fila = claves_empleado(
+                                nombre=fila_detalle.get("NOMBRE"),
+                                nombre_pila=fila_detalle.get("NOMBRE_PILA"),
+                                primer_apellido=fila_detalle.get("PRIMER_APELLIDO"),
+                                segundo_apellido=fila_detalle.get("SEGUNDO_APELLIDO"),
+                            )
+                            coincidencias = [
+                                codigo for codigo, base in por_codigo.items()
+                                if normalizar_nombre(base.get("NOMBRE")) in claves_fila
+                            ]
+                            if len(coincidencias) == 1:
+                                detalles[coincidencias[0]] = dict(fila_detalle)
+                    detalles_por_empresa[empresa] = detalles
+                else:
+                    sql_detalle, _ = queries.sql_empleados(
+                        base_datos=self.config.base_datos,
+                        esquema=empresa,
+                        codigos=patrones_codigo,
+                        columnas_disponibles=capacidad,
+                        columna_depto_empleado=self.config.columna_depto_empleado,
+                        columna_depto_catalogo=self.config.columna_depto_catalogo,
+                        columna_puesto_empleado=self.config.columna_puesto_empleado,
+                        columna_puesto_catalogo=self.config.columna_puesto_catalogo,
+                    )
+                    with self._fabrica(self.config) as conexion:
+                        filas_detalle = self._ejecutor(conexion, sql_detalle, patrones_codigo)
+                    detalles_por_empresa[empresa] = {
+                        _texto(fila.get("EMPLEADO")): dict(fila) for fila in filas_detalle
+                    }
+            except Exception as exc:  # noqa: BLE001 - se conserva el hit primario
+                error = _clasificar_error_consulta(exc, empresa)
+                resultado.errores.append(error)
+                detalles_por_empresa[empresa] = {}
+
+        for empresa, por_codigo in hits.items():
+            for codigo, base in por_codigo.items():
+                detalle = dict(base)
+                detalle.update(detalles_por_empresa.get(empresa, {}).get(codigo, {}))
+                detalle["EMPLEADO"] = codigo
+                detalle["NOMBRE"] = detalle.get("NOMBRE") or base["NOMBRE"]
+                detalle["FUENTE"] = empresa
+                detalle["ESQUEMA"] = empresa
+                detalle["TABLA"] = queries.TABLA_EMPLEADO
+                codigo_departamento = _texto(
+                    detalle.get("DEPARTAMENTO_CODIGO") or detalle.get("DEPARTAMENTO")
+                )
+                if codigo_departamento:
+                    try:
+                        departamento = self._obtener_departamento(
+                            empresa, codigo_departamento, capacidades.get(empresa, {})
+                        )
+                    except queries.EsquemaInsuficiente:
+                        departamento = None
+                    except Exception as exc:  # noqa: BLE001 - conserva el código
+                        departamento = None
+                        resultado.errores.append(
+                            _clasificar_error_consulta(exc, f"{empresa}.DEPARTAMENTO")
+                        )
+                    if departamento:
+                        descripcion = _texto(departamento.get("DESCRIPCION"))
+                        if descripcion:
+                            detalle["DEPARTAMENTO_CODIGO"] = codigo_departamento
+                            detalle["DEPARTAMENTO"] = descripcion
+                        if empresa == "SERVIAM":
+                            detalle["ESQUEMA_ORIGEN"] = _texto(
+                                departamento.get("ESQUEMA_ORIGEN")
+                            )
+                empleado = Empleado.desde_fila(empresa, detalle)
+                resultado.empleados.append(empleado)
+                for consulta in consultas:
+                    clave = str(consulta.get("clave") or "")
+                    if not clave:
+                        continue
+                    # La sentencia ya filtró esta fila con los patrones LIKE.
+                    # En una búsqueda de un solo usuario no se debe descartar
+                    # otra vez por el orden textual de NOMBRE: SERVIAM puede
+                    # devolver NOMBRE y partes estructuradas en orden distinto.
+                    coincide = len(consultas) == 1 or busqueda.coincide_consulta(
+                        empleado, consulta
+                    )
+                    if not coincide:
+                        # Para SERVIAM, también comparar sus campos estructurados.
+                        terminos = consulta.get("terminos") or []
+                        estructurado = " ".join(str(detalle.get(campo) or "") for campo in (
+                            "NOMBRE_PILA", "PRIMER_APELLIDO", "SEGUNDO_APELLIDO"
+                        ))
+                        if empresa != "SERVIAM" or not busqueda.coincide_terminos(estructurado, terminos):
+                            continue
+                    resultado.por_consulta.setdefault(clave, []).append(empleado)
+
+        resultado.empresas_consultadas = disponibles
+        resultado.empresas_sin_datos = [empresa for empresa in disponibles if not hits[empresa]]
+        for empresa in disponibles:
+            total = len(hits[empresa])
+            _avisar(al_progreso, seguimiento.nuevo_evento(
+                empresa,
+                seguimiento.ESTADO_COMPLETADA if total else seguimiento.ESTADO_SIN_RESULTADOS,
+                resultados=total,
+                duracion=resultado.duracion_total,
+                detalle=(
+                    f"{total} coincidencia(s); enriquecimiento posterior por código."
+                    if total else "Sin coincidencias en la búsqueda consolidada."
+                ),
+            ))
+        resultado.duracion_total = time.perf_counter() - inicio_total
+        return resultado
 
     def _empresas(self, empresas: Sequence[str] | None) -> list[str]:
         if empresas is None:
@@ -677,14 +984,11 @@ class RepositorioEmpleados:
         if not preparadas:
             return ResultadoConsulta()
 
-        seleccion = self._empresas(empresas)
-        return self._consultar(
-            seleccion,
-            0,
-            [],
-            consultas=preparadas,
-            al_progreso=al_progreso,
-            debe_cancelar=debe_cancelar,
+        # La búsqueda principal siempre consolida las 18 empresas. La
+        # selección configurada deja de controlar este lookup; las consultas
+        # por empresa se reservan para enriquecer los IDs ya encontrados.
+        return self._buscar_consolidado(
+            preparadas, al_progreso=al_progreso, debe_cancelar=debe_cancelar
         )
 
     def buscar_por_nombres(

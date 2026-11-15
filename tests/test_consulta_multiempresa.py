@@ -138,6 +138,31 @@ def repositorio_falso(
         return conexion()
 
     def ejecutor(_conexion, sql, parametros):
+        if "TABLE_SCHEMA AS EMPRESA" in sql and "INFORMATION_SCHEMA.COLUMNS" in sql:
+            filas = []
+            for empresa, esquema in esquemas.items():
+                if esquema.error_metadatos is not None:
+                    continue
+                filas.extend(
+                    {"EMPRESA": empresa, "TABLE_NAME": tabla, "COLUMN_NAME": columna}
+                    for tabla, columnas in esquema.columnas.items()
+                    for columna in columnas
+                )
+            return filas
+        if "UNION ALL" in sql:
+            filas = []
+            for empresa, esquema in esquemas.items():
+                if esquema.error_consulta is not None:
+                    continue
+                if "EMPLEADO" not in esquema.columnas:
+                    continue
+                for fila in esquema.filas:
+                    filas.append({
+                        "EMPLEADO": fila.get("EMPLEADO"),
+                        "NOMBRE": fila.get("NOMBRE"),
+                        "FUENTE": empresa,
+                    })
+            return filas
         empresa = _empresa_de(sql, parametros, esquemas)
         esquema = esquemas.get(empresa)
         if esquema is None:
@@ -152,8 +177,13 @@ def repositorio_falso(
                 for tabla, columnas in esquema.columnas.items()
                 for columna in columnas
             ]
+        if "VW_EMPLEADOS_MDA" in sql:
+            return list((esquemas.get("SERVIAM") or EsquemaFalso({})).filas)
         if esquema.error_consulta is not None:
             raise esquema.error_consulta
+        if "IN (" in sql and "E.[EMPLEADO]" in sql:
+            codigos = {str(valor) for valor in parametros}
+            return [fila for fila in esquema.filas if str(fila.get("EMPLEADO")) in codigos]
         return list(esquema.filas)
 
     return RepositorioEmpleados(
@@ -182,6 +212,60 @@ def columnas_simples() -> dict[str, list[str]]:
 # Escenarios 1 a 6: consulta adaptativa según columnas disponibles
 # ===========================================================================
 class PruebasConsultaAdaptativa(unittest.TestCase):
+    def test_union_all_consolida_las_18_empresas_con_parametros(self) -> None:
+        sql, parametros = queries.sql_busqueda_consolidada(
+            base_datos="EXACTUS", patrones=["%PEREZ%JUAN%"]
+        )
+        self.assertEqual(sql.count("SELECT E.[EMPLEADO]"), 18)
+        self.assertEqual(sql.count("UNION ALL"), 17)
+        self.assertIn("'ANDINA' AS FUENTE", sql)
+        self.assertIn("'SERVIAM' AS FUENTE", sql)
+        self.assertIn("'YACLOT' AS FUENTE", sql)
+        self.assertEqual(len(parametros), 18)
+        self.assertEqual(set(parametros), {"%PEREZ%JUAN%"})
+        self.assertNotIn("TOP", sql.upper())
+
+    def test_union_compone_nombre_solo_con_columnas_verificadas(self) -> None:
+        sql, _ = queries.sql_busqueda_consolidada(
+            base_datos="EXACTUS", empresas=["CALCA"], patrones=["%JUAN%PEREZ%"],
+            columnas_por_empresa={
+                "CALCA": {
+                    "EMPLEADO": {
+                        "EMPLEADO", "NOMBRE_PILA", "PRIMER_APELLIDO"
+                    }
+                }
+            },
+        )
+        self.assertIn("CONCAT(ISNULL(E.[NOMBRE_PILA]", sql)
+        self.assertIn("AS NOMBRE", sql)
+        self.assertNotIn("E.[NOMBRE]", sql)
+
+    def test_consultas_mda_y_departamento_exactus(self) -> None:
+        empleados, parametros = queries.sql_empleados_serviam("%PEREZ%JUAN%")
+        self.assertIn("[Serviam_GP].[MDA].[VW_EMPLEADOS_MDA]", empleados)
+        self.assertIn("NOMBRE_PILA", empleados)
+        self.assertEqual(parametros, ["%PEREZ%JUAN%"])
+        departamentos, params = queries.sql_departamentos_serviam("D01")
+        self.assertIn("ESQUEMA_ORIGEN", departamentos)
+        self.assertEqual(params, ["D01"])
+        estructurada, params = queries.sql_empleados_serviam_estructurada([
+            ("PEREZ AMOROS JUAN CARLOS", ["JUAN", "CARLOS", "PEREZ", "AMOROS"])
+        ])
+        self.assertIn("NOMBRE_PILA", estructurada)
+        self.assertIn("PRIMER_APELLIDO", estructurada)
+        self.assertIn("SEGUNDO_APELLIDO", estructurada)
+        self.assertIn(" OR ", estructurada)
+        self.assertEqual(len(params), 5)
+        exactus, params = queries.sql_departamento_exactus(
+            base_datos="EXACTUS", esquema="INKA", codigo="D01",
+            columnas_disponibles={
+                "DEPARTAMENTO": {"DEPARTAMENTO", "DESCRIPCION", "ACTIVO"}
+            },
+        )
+        self.assertIn("[EXACTUS].[INKA].[DEPARTAMENTO]", exactus)
+        self.assertNotIn("[JEFE]", exactus)
+        self.assertEqual(params, ["D01"])
+
     def test_01_empresa_con_todas_las_columnas(self) -> None:
         sql = sql_de("SERVIAM", COLUMNAS_COMPLETAS)
         self.assertIn("E.[U_CORREO_CORP] AS U_CORREO_CORP", sql)
@@ -291,7 +375,7 @@ class PruebasAislamientoEmpresas(unittest.TestCase):
         self.assertEqual(resultado.empresas_sin_datos, ["SERVIAM"])
         self.assertEqual(resultado.empresas_consultadas, ["SERVIAM"])
 
-    def test_21_una_empresa_falla_y_las_demas_continuan(self) -> None:
+    def test_21_busqueda_principal_es_una_consulta_consolidada(self) -> None:
         repo = repositorio_falso(
             config_dos_empresas(),
             {
@@ -317,10 +401,8 @@ class PruebasAislamientoEmpresas(unittest.TestCase):
         resultado = repo.buscar_por_nombres(["ANA TORRES"])
         self.assertEqual(len(resultado.empleados), 1)
         self.assertEqual(resultado.empleados[0].empresa, "SERVIAM")
-        self.assertEqual(len(resultado.errores), 1)
-        self.assertEqual(resultado.errores[0]["empresa"], "FILASUR")
-        self.assertEqual(resultado.errores[0]["categoria"], "columna")
-        self.assertIn("SERVIAM", resultado.empresas_consultadas)
+        self.assertFalse(any("FUENTE" in error["mensaje"] for error in resultado.errores))
+        self.assertIn("FILASUR", resultado.empresas_sin_datos)
 
     def test_22_no_repite_advertencias_en_cada_lote(self) -> None:
         contador: dict[str, int] = {}
@@ -350,16 +432,35 @@ class PruebasAislamientoEmpresas(unittest.TestCase):
         resultado = repo.buscar_por_nombres(
             ["ANA TORRES", "LUIS PEREZ", "CARLOS RUIZ"]
         )
-        # Tres lotes de un nombre, pero los metadatos se leen una sola vez por
-        # empresa y la advertencia de FILASUR no se duplica.
-        self.assertEqual(contador.get("FILASUR"), 1)
-        self.assertEqual(len(resultado.errores), 1)
+        # La búsqueda consolidada consulta metadatos como una sola operación;
+        # cambiar el número de usuarios no vuelve a inspeccionar por empresa.
+        self.assertEqual(contador, {})
+        self.assertTrue(resultado.empresas_consultadas)
 
 
 # ===========================================================================
 # Escenarios 10 a 18: identidad, fuentes y selección manual
 # ===========================================================================
 class PruebasIdentidadYSeleccion(unittest.TestCase):
+    def test_sin_departamento_utiliza_puesto_y_registra_origen(self) -> None:
+        empleado = Empleado(
+            empresa="ANDINA", codigo="9", nombre="ANA TORRES", puesto="ANALISTA"
+        )
+        resultado = resolver([empleado]).resolver("ANA TORRES")
+        self.assertEqual(resultado.area, "ANALISTA")
+        self.assertEqual(resultado.origen_area, "PUESTO")
+
+    def test_departamento_sin_descripcion_conserva_codigo_y_no_usa_puesto(self) -> None:
+        empleado = Empleado(
+            empresa="ANDINA", codigo="10", nombre="ANA TORRES",
+            departamento_codigo="D01", departamento="D01", puesto="ANALISTA",
+        )
+        resultado = resolver([empleado]).resolver("ANA TORRES")
+        self.assertEqual(resultado.area, "D01")
+        self.assertEqual(
+            resultado.origen_area, "DEPARTAMENTO_PENDIENTE_VALIDACION"
+        )
+
     def test_10_mismo_empleado_en_dos_empresas(self) -> None:
         repo = repositorio_falso(
             config_dos_empresas(),

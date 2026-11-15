@@ -76,6 +76,156 @@ def _tabla(base: str, esquema: str, tabla: str) -> str:
     )
 
 
+def sql_busqueda_consolidada(
+    *, base_datos: str, patrones: Iterable[str], empresas: Iterable[str] | None = None,
+    columnas_por_empresa: Mapping[str, Mapping[str, Iterable[str]]] | None = None,
+) -> tuple[str, list[str]]:
+    """Busca en una sola sentencia las coincidencias de todas las empresas.
+
+    Solo proyecta las tres columnas del contrato oficial. Los identificadores
+    se restringen a la lista corporativa y todos los patrones son parámetros.
+    La disponibilidad real de EMPLEADO/EMPLEADO y EMPLEADO/NOMBRE se valida
+    antes de ejecutar la sentencia.
+    """
+
+    base = validar_identificador(base_datos, "base de datos")
+    lista_patrones = [str(item) for item in patrones if str(item or "").strip()]
+    if not lista_patrones:
+        raise ValueError("La búsqueda consolidada requiere al menos un patrón.")
+    seleccion = (
+        {str(empresa).strip().upper() for empresa in empresas}
+        if empresas is not None else set(EMPRESAS)
+    )
+    autorizadas = [empresa for empresa in EMPRESAS if empresa in seleccion]
+    if not autorizadas:
+        raise ValueError("No hay empresas autorizadas para consultar.")
+    ramas: list[str] = []
+    parametros: list[str] = []
+    for empresa in autorizadas:
+        esquema = validar_esquema(empresa)
+        columnas_tabla = {
+            str(nombre).upper() for nombre in
+            (columnas_por_empresa or {}).get(empresa, {}).get(TABLA_EMPLEADO, ())
+        }
+        if not columnas_tabla:
+            columnas_tabla = {"EMPLEADO", "NOMBRE"}
+        if "EMPLEADO" not in columnas_tabla:
+            raise EsquemaInsuficiente(
+                f"{esquema}.EMPLEADO no tiene la columna EMPLEADO."
+            )
+        if "NOMBRE" in columnas_tabla:
+            nombre_sql = "E.[NOMBRE]"
+        else:
+            partes = [
+                campo for campo in (
+                    "NOMBRE_PILA", "PRIMER_APELLIDO", "SEGUNDO_APELLIDO"
+                ) if campo in columnas_tabla
+            ]
+            if not partes:
+                raise EsquemaInsuficiente(
+                    f"{esquema}.EMPLEADO no tiene columnas de nombre verificadas."
+                )
+            nombre_sql = "LTRIM(RTRIM(CONCAT(" + ", ' ', ".join(
+                f"ISNULL(E.[{campo}], '')" for campo in partes
+            ) + ")))"
+        predicados = " OR ".join("E.[NOMBRE] LIKE ? ESCAPE '\\'" for _ in lista_patrones)
+        if nombre_sql != "E.[NOMBRE]":
+            predicados = " OR ".join(
+                f"{nombre_sql} LIKE ? ESCAPE '\\'" for _ in lista_patrones
+            )
+        ramas.append(
+            f"SELECT E.[EMPLEADO] AS EMPLEADO, {nombre_sql} AS NOMBRE, "
+            f"'{esquema}' AS FUENTE FROM [{base}].[{esquema}].[EMPLEADO] E "
+            f"WHERE ({predicados})"
+        )
+        parametros.extend(lista_patrones)
+    return "\nUNION ALL\n".join(ramas), parametros
+
+
+def sql_empleados_serviam(patron: str | Iterable[str]) -> tuple[str, list[str]]:
+    """Consulta oficial de detalle SERVIAM desde la vista MDA."""
+
+    patrones = [patron] if isinstance(patron, str) else list(patron)
+    patrones = [str(item) for item in patrones if str(item or "").strip()]
+    if not patrones:
+        raise ValueError("La consulta SERVIAM requiere al menos un patrón.")
+    clausula = " OR ".join("NOMBRE LIKE ?" for _ in patrones)
+    return (
+        "SELECT NOMBRE, NOMBRE_PILA, PRIMER_APELLIDO, SEGUNDO_APELLIDO, "
+        "DEPARTAMENTO, U_CORREO_CORP, ACTIVO, PUESTO, E_MAIL "
+        "FROM [Serviam_GP].[MDA].[VW_EMPLEADOS_MDA] WHERE (" + clausula + ")",
+        patrones,
+    )
+
+
+def sql_empleados_serviam_estructurada(
+    criterios: Iterable[tuple[str, Iterable[str]]],
+) -> tuple[str, list[str]]:
+    """Busca detalles MDA por NOMBRE y por partes, sin depender del orden."""
+
+    grupos: list[str] = []
+    parametros: list[str] = []
+    for nombre, terminos in criterios:
+        tokens = [str(item).strip() for item in terminos if str(item or "").strip()]
+        patron_nombre = f"%{nombre}%" if str(nombre or "").strip() else ""
+        expresion_partes = (
+            "CONCAT(ISNULL(NOMBRE_PILA, ''), ' ', "
+            "ISNULL(PRIMER_APELLIDO, ''), ' ', ISNULL(SEGUNDO_APELLIDO, ''))"
+        )
+        alternativas: list[str] = []
+        if patron_nombre:
+            alternativas.append("NOMBRE LIKE ?")
+            parametros.append(patron_nombre)
+        if tokens:
+            partes = " AND ".join(f"{expresion_partes} LIKE ?" for _ in tokens)
+            alternativas.append(f"({partes})")
+            parametros.extend(f"%{token}%" for token in tokens)
+        if alternativas:
+            grupos.append("(" + " OR ".join(alternativas) + ")")
+    if not grupos:
+        raise ValueError("La consulta SERVIAM requiere nombre o términos seleccionados.")
+    sql = (
+        "SELECT NOMBRE, NOMBRE_PILA, PRIMER_APELLIDO, SEGUNDO_APELLIDO, "
+        "DEPARTAMENTO, U_CORREO_CORP, ACTIVO, PUESTO, E_MAIL "
+        "FROM [Serviam_GP].[MDA].[VW_EMPLEADOS_MDA] WHERE "
+        + " OR ".join(grupos)
+    )
+    return sql, parametros
+
+
+def sql_departamentos_serviam(codigo: str) -> tuple[str, list[str]]:
+    """Consulta oficial del catálogo de departamentos MDA de SERVIAM."""
+
+    return (
+        "SELECT ESQUEMA_ORIGEN, DEPARTAMENTO, DESCRIPCION, JEFE, ACTIVO "
+        "FROM [Serviam_GP].[MDA].[VW_DEPARTAMENTOS_MDA] "
+        "WHERE DEPARTAMENTO = ?",
+        [codigo],
+    )
+
+
+def sql_departamento_exactus(
+    *, base_datos: str, esquema: str, codigo: str,
+    columnas_disponibles: Mapping[str, Iterable[str]],
+) -> tuple[str, list[str]]:
+    """Consulta DEPARTAMENTO solo con columnas confirmadas por metadatos."""
+
+    esquema = validar_esquema(esquema)
+    columnas = _columnas_por_tabla(columnas_disponibles).get(TABLA_DEPARTAMENTO, set())
+    if "DEPARTAMENTO" not in columnas or "DESCRIPCION" not in columnas:
+        raise EsquemaInsuficiente(
+            f"{esquema}.DEPARTAMENTO no expone DEPARTAMENTO y DESCRIPCION."
+        )
+    opcionales = [campo for campo in ("JEFE", "ACTIVO") if campo in columnas]
+    seleccion = ["DEPARTAMENTO", "DESCRIPCION", *opcionales]
+    tabla = _tabla(base_datos, esquema, TABLA_DEPARTAMENTO)
+    sql = (
+        "SELECT " + ", ".join(f"[{campo}]" for campo in seleccion)
+        + f" FROM {tabla} WHERE [DEPARTAMENTO] = ?"
+    )
+    return sql, [codigo]
+
+
 def _limpiar(expresion: str) -> str:
     """Quita espacios y puntuación para una comparación tolerante."""
 
@@ -170,6 +320,7 @@ def sql_empleados(
     esquema: str,
     cantidad: int = 0,
     patrones: Iterable[str] | None = None,
+    codigos: Iterable[str] | None = None,
     columnas_disponibles: Mapping[str, Iterable[str]] | Iterable[str] | None = None,
     columna_depto_empleado: str = "DEPARTAMENTO",
     columna_depto_catalogo: str = "DEPARTAMENTO",
@@ -193,6 +344,9 @@ def sql_empleados(
     """
 
     lista_patrones = list(patrones) if patrones is not None else None
+    lista_codigos = list(codigos) if codigos is not None else None
+    if lista_patrones is not None and lista_codigos is not None:
+        raise ValueError("Use patrones o códigos, no ambos a la vez.")
     if lista_patrones is not None and not lista_patrones:
         raise ValueError("La búsqueda por patrones requiere al menos un patrón.")
 
@@ -330,6 +484,13 @@ def sql_empleados(
         sql_texto += f" WHERE ({clausulas}) ORDER BY E.[EMPLEADO]"
         return sql_texto, len(lista_patrones)
 
+    if lista_codigos is not None:
+        if not lista_codigos:
+            raise ValueError("La consulta por código requiere al menos un código.")
+        marcas = ", ".join("?" for _ in lista_codigos)
+        sql_texto += f" WHERE E.[EMPLEADO] IN ({marcas}) ORDER BY E.[EMPLEADO]"
+        return sql_texto, len(lista_codigos)
+
     if cantidad <= 0:
         return sql_texto + " ORDER BY E.[EMPLEADO]", 0
 
@@ -352,6 +513,20 @@ def sql_columnas_esquema(base_datos: str, esquema: str) -> str:
         "WHERE TABLE_SCHEMA = ? "
         "ORDER BY TABLE_NAME, ORDINAL_POSITION"
     )
+
+
+def sql_columnas_multiempresa(base_datos: str) -> tuple[str, list[str]]:
+    """Lee de una vez metadatos de EMPLEADO/DEPARTAMENTO para las 18 empresas."""
+
+    base = validar_identificador(base_datos, "base de datos")
+    marcas = ", ".join("?" for _ in EMPRESAS)
+    sql = (
+        "SELECT TABLE_SCHEMA AS EMPRESA, TABLE_NAME, COLUMN_NAME "
+        f"FROM [{base}].INFORMATION_SCHEMA.COLUMNS "
+        "WHERE TABLE_NAME IN ('EMPLEADO', 'DEPARTAMENTO') "
+        f"AND TABLE_SCHEMA IN ({marcas}) ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION"
+    )
+    return sql, list(EMPRESAS)
 
 
 def sql_tablas_existen(base_datos: str, esquema: str) -> str:
