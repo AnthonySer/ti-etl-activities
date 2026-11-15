@@ -206,6 +206,13 @@ class PruebasCatalogoAreas(unittest.TestCase):
         self.assertTrue(resultado.similares)
         self.assertTrue(resultado.requiere_confirmacion)
 
+    def test_abreviatura_rr_hh_sugiere_recursos_humanos(self) -> None:
+        maestro = crear_maestro({"ANA TORRES": "RECURSOS HUMANOS"})
+        resultado = catalogo_areas.validar_area("RR HH", maestro=maestro)
+        self.assertTrue(resultado.valido)
+        self.assertFalse(resultado.existente)
+        self.assertEqual(resultado.similares[0].nombre, "RECURSOS HUMANOS")
+
     def test_area_vacia_no_es_valida(self) -> None:
         resultado = catalogo_areas.validar_area("   ", maestro=self.maestro)
         self.assertFalse(resultado.valido)

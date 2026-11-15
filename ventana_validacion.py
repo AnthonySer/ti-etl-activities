@@ -92,6 +92,161 @@ def filtrar_areas(areas: Iterable[str], texto: str = "") -> list[str]:
     )
 
 
+class VentanaDecisionArea(tk.Toplevel):
+    """Confirma si se reutiliza un área, se crea o se corrige su nombre."""
+
+    def __init__(
+        self,
+        padre: tk.Misc,
+        *,
+        usuario: str,
+        area: str,
+        resultado: catalogo_areas.ResultadoArea,
+        areas: list[str],
+    ) -> None:
+        super().__init__(padre)
+        self.title("Confirmar nombre del área")
+        self.geometry("620x390")
+        self.resizable(False, False)
+        self.configure(bg=FONDO)
+        self.transient(padre)
+        self.grab_set()
+        self.decision: tuple[str, str] = ("cancelar", "")
+        self._resultado = resultado
+        self._var_area = tk.StringVar(value=area)
+        opciones = list(dict.fromkeys(
+            [resultado.area_reutilizable, *(item.nombre for item in resultado.similares), *areas]
+        ))
+        opciones = [item for item in opciones if item]
+        sugerida = resultado.area_reutilizable or (
+            resultado.similares[0].nombre if resultado.similares else ""
+        )
+        self._var_existente = tk.StringVar(
+            value=sugerida or (opciones[0] if opciones else "")
+        )
+
+        ttk.Label(
+            self,
+            text="Revise el nombre del área antes de guardarlo",
+            style="Seccion.TLabel",
+            wraplength=550,
+        ).pack(anchor="w", padx=18, pady=(16, 6))
+        ttk.Label(
+            self,
+            text=f"Usuario: {usuario}",
+            style="Subtitulo.TLabel",
+        ).pack(anchor="w", padx=18, pady=(0, 10))
+        ttk.Label(self, text="Nombre ingresado:").pack(anchor="w", padx=18)
+        ttk.Entry(self, textvariable=self._var_area).pack(
+            fill="x", padx=18, pady=(3, 8)
+        )
+        mensaje = resultado.mensaje
+        if resultado.similares:
+            mensaje += "\nSugerencia: " + ", ".join(
+                f"{item.nombre} ({item.similitud:.0%})"
+                for item in resultado.similares[:4]
+            )
+        ttk.Label(
+            self,
+            text=mensaje,
+            style="Subtitulo.TLabel",
+            wraplength=550,
+            justify="left",
+        ).pack(anchor="w", padx=18, pady=(0, 8))
+        fila_existente = ttk.Frame(self)
+        fila_existente.pack(fill="x", padx=18, pady=(0, 10))
+        ttk.Label(fila_existente, text="Área que se reutilizará:").pack(
+            side="left", padx=(0, 8)
+        )
+        self._combo_existente = ttk.Combobox(
+            fila_existente,
+            textvariable=self._var_existente,
+            values=opciones,
+            state="readonly",
+        )
+        self._combo_existente.pack(side="left", fill="x", expand=True)
+        self._btn_existente = ttk.Button(
+            self,
+            text="Área ya existente",
+            command=self._usar_existente,
+            state="normal" if opciones else "disabled",
+        )
+        self._btn_existente.pack(fill="x", padx=18, pady=3)
+        self._btn_nueva = ttk.Button(
+            self,
+            text="Sí, nueva área",
+            style="Principal.TButton",
+            command=self._usar_nueva,
+            state="disabled" if resultado.existente else "normal",
+        )
+        self._btn_nueva.pack(fill="x", padx=18, pady=3)
+        ttk.Button(
+            self,
+            text="Corregir nombre de área",
+            command=self._corregir,
+        ).pack(fill="x", padx=18, pady=3)
+        ttk.Button(
+            self, text="Cancelar", command=self.destroy
+        ).pack(anchor="e", padx=18, pady=(4, 12))
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    def _usar_existente(self) -> None:
+        area = self._var_existente.get().strip()
+        if area:
+            self.decision = ("existente", area)
+            self.destroy()
+
+    def _usar_nueva(self) -> None:
+        area = self._var_area.get().strip()
+        if area and not self._resultado.existente:
+            self.decision = ("nueva", area)
+            self.destroy()
+
+    def _corregir(self) -> None:
+        area = self._var_area.get().strip()
+        if not area:
+            messagebox.showwarning(
+                "Nombre requerido", "Escriba el nombre corregido del área.", parent=self
+            )
+            return
+        self.decision = ("corregir", area)
+        self.destroy()
+
+
+def pedir_decision_area(
+    padre: tk.Misc, usuario: str, area: str, maestro: Maestro
+) -> str | None:
+    """Solicita reutilizar, crear o corregir un área antes de asignarla."""
+
+    actual = str(area or "").strip()
+    while True:
+        resultado = catalogo_areas.validar_area(actual, maestro=maestro)
+        if not resultado.valido:
+            messagebox.showwarning("Área no válida", resultado.mensaje, parent=padre)
+            return None
+        if resultado.existente:
+            return resultado.area_reutilizable or resultado.nombre
+        dialogo = VentanaDecisionArea(
+            padre,
+            usuario=usuario,
+            area=actual,
+            resultado=resultado,
+            areas=catalogo_areas.catalogo_desde_maestro(maestro),
+        )
+        padre.wait_window(dialogo)
+        accion, valor = dialogo.decision
+        if accion == "cancelar":
+            return None
+        if accion == "corregir":
+            actual = valor
+            continue
+        if accion == "existente":
+            return valor
+        if accion == "nueva":
+            return valor
+        return None
+
+
 class VentanaValidacion(tk.Toplevel):
     """Revisión asistida de usuarios y áreas antes de generar el Excel."""
 
@@ -335,6 +490,16 @@ class VentanaValidacion(tk.Toplevel):
         )
         self._btn_sql.pack(side="left")
         ttk.Button(
+            izquierda,
+            text="Buscar en Excel maestro",
+            command=self._buscar_en_maestro,
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(
+            izquierda,
+            text="Buscar otro nombre…",
+            command=self._buscar_otro_nombre,
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(
             izquierda, text="Asignar área", command=self._asignar_area
         ).pack(side="left", padx=6)
         ttk.Button(
@@ -551,6 +716,31 @@ class VentanaValidacion(tk.Toplevel):
     # ------------------------------------------------------------------
     # Acciones
     # ------------------------------------------------------------------
+    def _buscar_en_maestro(self) -> None:
+        registro = self._un_registro()
+        if registro is None:
+            return
+        VentanaBuscarExcelMaestro(
+            self,
+            usuario=str(registro.get("usuario") or ""),
+            maestro=self.maestro,
+            al_elegir=lambda candidato: self._elegir_candidato(
+                registro, candidato
+            ),
+        )
+
+    def _buscar_otro_nombre(self) -> None:
+        registro = self._un_registro()
+        if registro is None:
+            return
+        VentanaConsultaSqlManual(
+            self,
+            usuario=str(registro.get("usuario") or ""),
+            al_elegir=lambda candidato: self._elegir_candidato(
+                registro, candidato
+            ),
+        )
+
     def _consultar_sql(self) -> None:
         registros = self._seleccionados()
         if not registros:
@@ -620,6 +810,7 @@ class VentanaValidacion(tk.Toplevel):
             empresas=list(EMPRESAS),
         )
         self._ocupado = True
+        self._btn_sql.configure(state="disabled")
         self._var_resumen.set("Consultando SQL Server por lotes…")
 
         def tarea():
@@ -662,6 +853,7 @@ class VentanaValidacion(tk.Toplevel):
 
         def terminar(resultado):
             self._ocupado = False
+            self._btn_sql.configure(state="normal")
             if isinstance(resultado, Exception):
                 try:
                     ventana.finalizar(mensaje=f"Error: {resultado}")
@@ -867,6 +1059,11 @@ class VentanaValidacion(tk.Toplevel):
             elif not cancelada and len(registros) == 1 and not resumen.get("empleados", 0):
                 self.after(10, lambda: self._abrir_seleccion(registros[0]))
 
+        # Iniciar el trabajador después de definir la tarea y su callback de
+        # finalización. Si esta llamada queda dentro de otro método o detrás
+        # de un return, la ventana aparece pero la consulta nunca se ejecuta.
+        self._ejecutar(tarea, terminar)
+
     def _confirmar_y_cerrar_seguimiento(
         self,
         ventana: "VentanaSeguimientoConsulta",
@@ -881,8 +1078,6 @@ class VentanaValidacion(tk.Toplevel):
             except tk.TclError:
                 pass
         return asignada
-
-        self._ejecutar(tarea, terminar)
 
     def _confirmar_o_pedir_area(
         self, registro: dict[str, Any], candidato: dict[str, Any], resolucion: Any
@@ -944,41 +1139,9 @@ class VentanaValidacion(tk.Toplevel):
         """Valida el área, pide confirmación y la asigna al usuario."""
 
         usuario = str(registro.get("usuario") or "")
-        resultado = catalogo_areas.validar_area(area, maestro=self.maestro)
-        if not resultado.valido:
-            messagebox.showwarning("Área no válida", resultado.mensaje)
+        area_final = pedir_decision_area(self, usuario, area, self.maestro)
+        if not area_final:
             return
-
-        if resultado.existente:
-            area_final = resultado.area_reutilizable or resultado.nombre
-            if not messagebox.askyesno("Área existente", resultado.mensaje):
-                return
-        elif resultado.similares:
-            similar = resultado.similares[0]
-            if messagebox.askyesno(
-                "Área parecida",
-                f"Ya existe el área '{similar.nombre}' "
-                f"({similar.similitud:.0%} de similitud).\n\n"
-                f"¿Desea reutilizar '{similar.nombre}' en lugar de crear "
-                f"'{resultado.nombre}'?",
-            ):
-                area_final = similar.nombre
-            elif messagebox.askyesno(
-                "Confirmar área nueva",
-                f"'{resultado.nombre}' es parecida a '{similar.nombre}', pero "
-                "distinta.\n\n¿Registrarla como área nueva?",
-            ):
-                area_final = resultado.nombre
-            else:
-                return
-        else:
-            if not messagebox.askyesno(
-                "Confirmar área nueva",
-                f"El área '{resultado.nombre}' no existe en el maestro.\n\n"
-                f"¿Registrarla y asignarla a '{usuario}'?",
-            ):
-                return
-            area_final = resultado.nombre
 
         if not self._confirmar_asignacion_candidato(
             usuario, candidato, area_final
@@ -1062,11 +1225,12 @@ class VentanaValidacion(tk.Toplevel):
         if not area:
             messagebox.showwarning("Área vacía", "Indique un área válida.")
             return
+        if not self._asignar_en_maestro(
+            str(registro.get("usuario") or ""), area, procedencia.MANUAL
+        ):
+            return
         self.revision.asignar_manual(registro.get("usuario"), area)
         self.revision.guardar()
-        self._asignar_en_maestro(
-            str(registro.get("usuario") or ""), area, procedencia.MANUAL
-        )
         self._refrescar()
         self._var_resumen.set(
             f"{registro.get('usuario')}: área asignada manualmente → {area}"
@@ -1082,7 +1246,9 @@ class VentanaValidacion(tk.Toplevel):
     ) -> bool:
         if self._al_asignar is not None:
             try:
-                self._al_asignar(usuario, area, origen)
+                guardada = self._al_asignar(usuario, area, origen)
+                if guardada is False:
+                    return False
             except Exception as exc:  # noqa: BLE001
                 LOGGER.error("No se pudo persistir la asignación: %s", exc)
                 messagebox.showerror(
@@ -1528,6 +1694,177 @@ class VentanaAsignarArea(tk.Toplevel):
         self.destroy()
 
 
+class VentanaBuscarExcelMaestro(tk.Toplevel):
+    """Busca nombres y sugiere áreas existentes en el Excel maestro."""
+
+    def __init__(
+        self,
+        padre: VentanaValidacion,
+        *,
+        usuario: str,
+        maestro: Maestro,
+        al_elegir: Callable[[dict[str, Any]], bool],
+    ) -> None:
+        super().__init__(padre)
+        self.title("Buscar usuario en Excel maestro")
+        self.geometry("760x500")
+        self.minsize(620, 380)
+        self.configure(bg=FONDO)
+        self.transient(padre)
+        self.grab_set()
+        self._maestro = maestro
+        self._al_elegir = al_elegir
+        self._candidatos: list[dict[str, Any]] = []
+        self._after_busqueda: str | None = None
+        self._var_nombre = tk.StringVar(value=usuario)
+        self._var_estado = tk.StringVar(value="Escriba el nombre para ver sugerencias.")
+
+        ttk.Label(
+            self, text="Buscar usuario en el Excel maestro", style="Seccion.TLabel"
+        ).pack(anchor="w", padx=18, pady=(14, 4))
+        ttk.Label(
+            self,
+            text=f"Usuario pendiente: {usuario}",
+            style="Subtitulo.TLabel",
+        ).pack(anchor="w", padx=18, pady=(0, 8))
+        fila = ttk.Frame(self)
+        fila.pack(fill="x", padx=18, pady=(0, 8))
+        ttk.Label(fila, text="Nombre a buscar:").pack(side="left", padx=(0, 8))
+        entrada = ttk.Entry(fila, textvariable=self._var_nombre)
+        entrada.pack(side="left", fill="x", expand=True)
+        entrada.bind("<KeyRelease>", self._programar_busqueda)
+        entrada.bind("<Return>", lambda _evento: self._buscar())
+        ttk.Button(fila, text="Buscar", command=self._buscar).pack(side="left", padx=(8, 0))
+
+        contenedor = ttk.Frame(self)
+        contenedor.pack(fill="both", expand=True, padx=18, pady=(0, 6))
+        self._tabla = ttk.Treeview(
+            contenedor,
+            columns=("usuario", "area", "coincidencia"),
+            show="headings",
+            selectmode="browse",
+        )
+        for columna, titulo, ancho in (
+            ("usuario", "USUARIO EN MAESTRO", 360),
+            ("area", "ÁREA ASIGNADA", 250),
+            ("coincidencia", "SIMILITUD", 100),
+        ):
+            self._tabla.heading(columna, text=titulo)
+            self._tabla.column(columna, width=ancho, anchor="w")
+        barra = ttk.Scrollbar(contenedor, orient="vertical", command=self._tabla.yview)
+        self._tabla.configure(yscrollcommand=barra.set)
+        self._tabla.pack(side="left", fill="both", expand=True)
+        barra.pack(side="right", fill="y")
+        self._tabla.bind("<Double-1>", lambda _evento: self._elegir())
+        ttk.Label(self, textvariable=self._var_estado, style="Subtitulo.TLabel").pack(
+            anchor="w", padx=18, pady=(0, 8)
+        )
+        botones = ttk.Frame(self)
+        botones.pack(fill="x", padx=18, pady=(0, 14))
+        self._btn_elegir = ttk.Button(
+            botones,
+            text="Asignar área seleccionada",
+            style="Principal.TButton",
+            command=self._elegir,
+            state="disabled",
+        )
+        self._btn_elegir.pack(side="right")
+        ttk.Button(botones, text="Cancelar", command=self.destroy).pack(
+            side="right", padx=(0, 8)
+        )
+        self._tabla.bind("<<TreeviewSelect>>", self._actualizar_boton)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self._buscar()
+        entrada.focus_set()
+        entrada.selection_range(0, tk.END)
+
+    def _programar_busqueda(self, _evento=None) -> None:
+        if self._after_busqueda:
+            try:
+                self.after_cancel(self._after_busqueda)
+            except tk.TclError:
+                pass
+        self._after_busqueda = self.after(180, self._buscar)
+
+    def _buscar(self) -> None:
+        self._after_busqueda = None
+        consulta = self._var_nombre.get().strip()
+        self._tabla.delete(*self._tabla.get_children())
+        self._candidatos = []
+        try:
+            from core import similitud
+            from database.normalizador import normalizar_nombre
+
+            df = self._maestro.como_dataframe()
+            clave_consulta = normalizar_nombre(consulta)
+            filas: list[tuple[float, dict[str, Any]]] = []
+            for _, fila in df.iterrows():
+                nombre = str(fila.get(cfg.COLUMNA_USUARIO) or "").strip()
+                area = str(fila.get(cfg.COLUMNA_AREA) or "").strip()
+                if not nombre or not area:
+                    continue
+                clave = normalizar_nombre(nombre)
+                if not consulta:
+                    puntaje = 0.0
+                elif clave == clave_consulta:
+                    puntaje = 1.0
+                elif clave_consulta and clave_consulta in clave:
+                    puntaje = 0.96
+                elif clave and clave in clave_consulta:
+                    puntaje = 0.92
+                else:
+                    puntaje = similitud.comparar(consulta, nombre)
+                if not consulta or puntaje >= 0.28:
+                    filas.append((puntaje, {
+                        "origen": "MAESTRO",
+                        "empresa": "MAESTRO",
+                        "fuente": "MAESTRO",
+                        "nombre": nombre,
+                        "area": area,
+                        "AREA": area,
+                        "AREA_MAESTRO": area,
+                        "activo": None,
+                        "tipo": "exacta" if puntaje == 1.0 else "aproximada",
+                        "similitud": puntaje,
+                    }))
+            filas.sort(key=lambda item: (item[0], item[1]["nombre"].casefold()), reverse=True)
+            self._candidatos = [candidato for _, candidato in filas[:200]]
+            for indice, candidato in enumerate(self._candidatos):
+                self._tabla.insert(
+                    "", "end", iid=str(indice),
+                    values=(
+                        candidato["nombre"], candidato["area"],
+                        f"{candidato['similitud']:.0%}" if consulta else "—",
+                    ),
+                )
+            self._var_estado.set(
+                f"{len(self._candidatos)} sugerencia(s). Seleccione el usuario correcto."
+                if self._candidatos
+                else "No se encontraron sugerencias. Pruebe con otro nombre."
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._var_estado.set(f"No se pudo leer el Excel maestro: {exc}")
+        self._actualizar_boton()
+
+    def _actualizar_boton(self, _evento=None) -> None:
+        self._btn_elegir.configure(
+            state="normal" if self._tabla.selection() else "disabled"
+        )
+
+    def _elegir(self) -> None:
+        seleccion = self._tabla.selection()
+        if not seleccion:
+            return
+        candidato = self._candidatos[int(seleccion[0])]
+        try:
+            asignada = self._al_elegir(dict(candidato))
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("No se pudo asignar el área", str(exc), parent=self)
+            return
+        if asignada:
+            self.destroy()
+
+
 class VentanaOrdenTerminos(tk.Toplevel):
     """Organiza el orden de búsqueda cuando el solicitante tiene 3+ palabras.
 
@@ -1959,6 +2296,18 @@ class VentanaSeguimientoConsulta(tk.Toplevel):
                 ),
                 tags=("pendiente",),
             )
+        # La búsqueda primaria es una sola sentencia UNION ALL. Se muestra
+        # separada para distinguirla del enriquecimiento de cada empresa.
+        self._iids["UNION ALL"] = "busqueda_consolidada"
+        self._tabla.insert(
+            "", 0, iid="busqueda_consolidada",
+            values=(
+                "BÚSQUEDA UNION ALL",
+                seguimiento.etiqueta(seguimiento.ESTADO_PENDIENTE),
+                "—", "—", "Esperando la búsqueda principal",
+            ),
+            tags=("pendiente",),
+        )
 
     def _construir_resumen(self) -> None:
         marco = ttk.LabelFrame(self, text="Resumen", padding=6)
@@ -2023,10 +2372,13 @@ class VentanaSeguimientoConsulta(tk.Toplevel):
             self._registrar_evento(evento)
 
     def _registrar_evento(self, evento: dict[str, Any]) -> None:
-        combinado = self._resumen.registrar(evento)
-        empresa = str(combinado.get("empresa") or "")
+        empresa = str(evento.get("empresa") or "")
         if not empresa:
             return
+        if empresa == "UNION ALL":
+            combinado = evento
+        else:
+            combinado = self._resumen.registrar(evento)
         iid = self._iids.get(empresa)
         if iid is None:
             return
@@ -2037,7 +2389,7 @@ class VentanaSeguimientoConsulta(tk.Toplevel):
         self._tabla.item(
             iid,
             values=(
-                empresa,
+                "BÚSQUEDA UNION ALL" if empresa == "UNION ALL" else empresa,
                 seguimiento.etiqueta(estado),
                 "—" if resultados is None else str(resultados),
                 self._formato_tiempo(duracion),
@@ -2045,7 +2397,8 @@ class VentanaSeguimientoConsulta(tk.Toplevel):
             ),
             tags=(self._TAG_POR_ESTADO.get(estado, "pendiente"),),
         )
-        self._actualizar_progreso()
+        if empresa != "UNION ALL":
+            self._actualizar_progreso()
 
     def _actualizar_progreso(self) -> None:
         datos = self._resumen.como_dict()
@@ -2206,6 +2559,7 @@ class VentanaConsultaSqlManual(tk.Toplevel):
         self._al_elegir = al_elegir
         self._filas: list[dict[str, Any]] = []
         self._tipo_resultado = "empleado"
+        self._consultando = False
         self._var_nombre = tk.StringVar(value=usuario)
         self._var_codigo_depto = tk.StringVar()
         self._var_empresa = tk.StringVar(value="ANDINA")
@@ -2225,14 +2579,16 @@ class VentanaConsultaSqlManual(tk.Toplevel):
         entrada.bind("<Return>", lambda _evento: self._buscar_todas())
         botones_busqueda = ttk.Frame(self)
         botones_busqueda.pack(fill="x", padx=20, pady=(4, 12))
-        ttk.Button(
+        self._btn_buscar_todas = ttk.Button(
             botones_busqueda, text="Buscar en las 18 empresas",
             style="Principal.TButton", command=self._buscar_todas,
-        ).pack(side="left", expand=True, fill="x", padx=(0, 6))
-        ttk.Button(
+        )
+        self._btn_buscar_todas.pack(side="left", expand=True, fill="x", padx=(0, 6))
+        self._btn_buscar_serviam = ttk.Button(
             botones_busqueda, text="Buscar en SERVIAM",
             command=self._buscar_serviam,
-        ).pack(side="left", expand=True, fill="x", padx=(6, 0))
+        )
+        self._btn_buscar_serviam.pack(side="left", expand=True, fill="x", padx=(6, 0))
 
         self._seccion(self, "Búsqueda de departamentos", "#E2F3E8")
         fila_depto = ttk.Frame(self)
@@ -2245,9 +2601,10 @@ class VentanaConsultaSqlManual(tk.Toplevel):
         ).pack(side="left", padx=(0, 16))
         ttk.Label(fila_depto, text="Código de departamento:").pack(side="left", padx=(0, 6))
         ttk.Entry(fila_depto, textvariable=self._var_codigo_depto, width=20).pack(side="left")
-        ttk.Button(
+        self._btn_buscar_departamento = ttk.Button(
             fila_depto, text="Buscar departamento", command=self._buscar_departamento,
-        ).pack(side="left", padx=(12, 0))
+        )
+        self._btn_buscar_departamento.pack(side="left", padx=(12, 0))
         ttk.Label(self, textvariable=self._var_estado, style="Subtitulo.TLabel").pack(
             anchor="w", padx=20, pady=(0, 6)
         )
@@ -2307,9 +2664,13 @@ class VentanaConsultaSqlManual(tk.Toplevel):
         )
 
     def _consultar(self, tipo: str, consulta: Callable[[Any], Any]) -> None:
+        if self._consultando:
+            return
         from config.sqlserver import cargar_configuracion
         from database.repository import RepositorioEmpleados
 
+        self._consultando = True
+        self._cambiar_estado_botones_consulta("disabled")
         self._tipo_resultado = tipo
         self._btn_usar.configure(state="disabled")
         self._var_estado.set("Consultando SQL Server…")
@@ -2319,6 +2680,8 @@ class VentanaConsultaSqlManual(tk.Toplevel):
             return consulta(repo)
 
         def terminar(resultado):
+            self._consultando = False
+            self._cambiar_estado_botones_consulta("normal")
             try:
                 if not self.winfo_exists():
                     return
@@ -2336,6 +2699,14 @@ class VentanaConsultaSqlManual(tk.Toplevel):
             self._mostrar_filas(filas)
 
         self._padre._ejecutar(tarea, terminar)
+
+    def _cambiar_estado_botones_consulta(self, estado: str) -> None:
+        for boton in (
+            self._btn_buscar_todas,
+            self._btn_buscar_serviam,
+            self._btn_buscar_departamento,
+        ):
+            boton.configure(state=estado)
 
     def _mostrar_filas(self, filas: list[dict[str, Any]]) -> None:
         self._filas = filas

@@ -394,6 +394,17 @@ class Maestro:
     def como_dataframe(self) -> pd.DataFrame:
         return self._df.copy()
 
+    def reemplazar_con(self, otro: "Maestro") -> None:
+        """Recarga el contenido de otro snapshot manteniendo la instancia.
+
+        Las ventanas de revisión comparten esta instancia; conservar su
+        identidad evita que sigan leyendo el snapshot anterior tras una
+        recarga segura del Excel.
+        """
+
+        self._df = self._preparar(otro.como_dataframe())
+        self._reconstruir_indice()
+
     def __len__(self) -> int:
         return len(self._df)
 

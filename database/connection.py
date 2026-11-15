@@ -163,6 +163,14 @@ def conectar(config: ConfiguracionSQL) -> Iterator[Any]:
     conexion = None
     try:
         conexion = pyodbc.connect(cadena, timeout=int(config.timeout), autocommit=False)
+        # El timeout de connect no limita las consultas ya iniciadas. PyODBC
+        # usa ``Connection.timeout`` como límite de ejecución de sentencias;
+        # se deja un mínimo razonable para la búsqueda consolidada de las 18
+        # empresas y se conserva cualquier valor superior configurado.
+        try:
+            conexion.timeout = max(60, int(config.timeout))
+        except Exception:  # noqa: BLE001 - algunos drivers no permiten cambiarlo
+            LOGGER.debug("El driver ODBC no admite timeout de consulta", exc_info=True)
         yield conexion
     except Exception as exc:  # noqa: BLE001 - se traduce a error controlado
         if isinstance(exc, ErrorConexionSQL):
