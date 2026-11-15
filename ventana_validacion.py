@@ -267,12 +267,17 @@ class VentanaValidacion(tk.Toplevel):
         self.transient(padre)
 
         self.revision = revision
+        self._padre = padre
         self.maestro = maestro or Maestro()
         self._al_asignar = al_asignar
         self._al_generar = al_generar
         self._ocupado = False
         self._generando = False
         self._iids: dict[str, dict[str, Any]] = {}
+        self._refresco_tabla_en_curso = False
+        self._refresco_tabla_version = 0
+        self._refresco_tabla_pendiente: tuple[int, list[dict[str, Any]], str, str, int, Any] | None = None
+        self._pintado_tabla_after_id: str | None = None
 
         self._var_busqueda = tk.StringVar()
         self._var_estado = tk.StringVar(value="Todos")
@@ -387,7 +392,8 @@ class VentanaValidacion(tk.Toplevel):
         ttk.Label(marco, text="Buscar:").pack(side="left")
         entrada = ttk.Entry(marco, textvariable=self._var_busqueda, width=34)
         entrada.pack(side="left", padx=(6, 14))
-        entrada.bind("<KeyRelease>", lambda _e: self._refrescar())
+        self._filtro_after_id = None
+        entrada.bind("<KeyRelease>", self._programar_refresco_filtro)
 
         ttk.Label(marco, text="Estado:").pack(side="left")
         self._combo_estado = ttk.Combobox(
@@ -418,6 +424,18 @@ class VentanaValidacion(tk.Toplevel):
             marco, "0 pendientes", estilo="warning", punto=True
         )
         self._pill_revision.pack(side="right")
+
+    def _programar_refresco_filtro(self, _evento: Any = None) -> None:
+        if self._filtro_after_id is not None:
+            try:
+                self.after_cancel(self._filtro_after_id)
+            except tk.TclError:
+                pass
+        self._filtro_after_id = self.after(250, self._refrescar_filtro)
+
+    def _refrescar_filtro(self) -> None:
+        self._filtro_after_id = None
+        self._refrescar()
 
     def _construir_tabla(self) -> None:
         marco = ttk.LabelFrame(
@@ -554,11 +572,13 @@ class VentanaValidacion(tk.Toplevel):
     # ------------------------------------------------------------------
     # Tabla y estado
     # ------------------------------------------------------------------
-    def _registros_filtrados(self) -> list[dict[str, Any]]:
-        busqueda = self._var_busqueda.get().strip().lower()
-        estado = self._var_estado.get()
+    @staticmethod
+    def _filtrar_registros(
+        registros: list[dict[str, Any]], busqueda: str, estado: str
+    ) -> list[dict[str, Any]]:
+        busqueda = busqueda.strip().lower()
         salida = []
-        for registro in self.revision.registros:
+        for registro in registros:
             if estado != "Todos" and str(registro.get("estado")) != estado:
                 continue
             if busqueda:
@@ -572,9 +592,99 @@ class VentanaValidacion(tk.Toplevel):
         return salida
 
     def _refrescar(self) -> None:
+        self._refresco_tabla_version += 1
+        version = self._refresco_tabla_version
+        if self._pintado_tabla_after_id is not None:
+            try:
+                self.after_cancel(self._pintado_tabla_after_id)
+            except tk.TclError:
+                pass
+            self._pintado_tabla_after_id = None
         self._tabla.delete(*self._tabla.get_children())
         self._iids.clear()
-        for indice, registro in enumerate(self._registros_filtrados(), start=1):
+        self._var_resumen.set("Actualizando resultados…")
+        snapshot = [dict(registro) for registro in self.revision.registros]
+        total_registros = self.revision.total_registros
+        validado = self.revision.validado
+        self._refresco_tabla_pendiente = (
+            version, snapshot, self._var_busqueda.get(), self._var_estado.get(),
+            total_registros, validado,
+        )
+        if not self._refresco_tabla_en_curso:
+            self._iniciar_refresco_tabla()
+
+    def _iniciar_refresco_tabla(self) -> None:
+        solicitud = self._refresco_tabla_pendiente
+        if solicitud is None or self._refresco_tabla_en_curso:
+            return
+        self._refresco_tabla_pendiente = None
+        self._refresco_tabla_en_curso = True
+        version, snapshot, busqueda, estado, total_registros, validado = solicitud
+
+        def preparar() -> tuple[int, list[dict[str, Any]], Any, dict[str, int], float, int]:
+            inicio = time.perf_counter()
+            filtrados = self._filtrar_registros(snapshot, busqueda, estado)
+            config = cargar_configuracion()
+            cantidad_validadas = sum(1 for registro in snapshot if validado(registro))
+            resumen = {
+                "total_registros": total_registros,
+                "areas_validadas": cantidad_validadas,
+                "por_revisar": len(snapshot) - cantidad_validadas,
+                "total_usuarios": len(snapshot),
+            }
+            duracion = time.perf_counter() - inicio
+            LOGGER.info(
+                "Rendimiento filtro_validacion: preparacion=%.3fs leidos=%s procesados=%s mostrados=%s consultas=0 errores=0",
+                duracion, len(snapshot), len(snapshot), len(filtrados),
+            )
+            return version, filtrados, config, resumen, duracion, len(snapshot)
+
+        def tarea() -> Any:
+            inicio_error = time.perf_counter()
+            try:
+                return True, preparar()
+            except Exception as exc:  # noqa: BLE001
+                return False, (version, exc, time.perf_counter() - inicio_error, len(snapshot))
+
+        ejecutar = getattr(self._padre, "_ejecutar_hilo", None)
+        if ejecutar is None:
+            # El padre normal es AplicacionTk y siempre proporciona este método.
+            self._refresco_tabla_en_curso = False
+            LOGGER.error("No existe el trabajador compartido para refrescar validación")
+            return
+        ejecutar(tarea, self._recibir_refresco_tabla, "filtro de validación")
+
+    def _recibir_refresco_tabla(self, resultado: Any) -> None:
+        exito, contenido = resultado
+        self._refresco_tabla_en_curso = False
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if exito:
+            version, registros, config, resumen, _duracion, _leidos = contenido
+            if version == self._refresco_tabla_version:
+                self._pintar_registros_filtrados(registros, config, resumen)
+        else:
+            version, exc, duracion, leidos = contenido
+            LOGGER.error(
+                "Falló filtro_validacion (versión=%s duración=%.3fs leídos=%s errores=1 tipo=%s)",
+                version, duracion, leidos, type(exc).__name__,
+            )
+            if version == self._refresco_tabla_version:
+                self._var_resumen.set("No se pudo actualizar la lista de validación.")
+        if self._refresco_tabla_pendiente is not None:
+            self._iniciar_refresco_tabla()
+
+    def _pintar_registros_filtrados(
+        self, registros: list[dict[str, Any]], config: Any, resumen: dict[str, int]
+    ) -> None:
+        self._tabla.delete(*self._tabla.get_children())
+        self._iids.clear()
+        version = self._refresco_tabla_version
+        filas: list[tuple[str, dict[str, Any], tuple[Any, ...], str]] = []
+        for indice, registro in enumerate(registros, start=1):
             iid = f"r{indice}"
             self._iids[iid] = registro
             estado = str(registro.get("estado") or "")
@@ -586,11 +696,7 @@ class VentanaValidacion(tk.Toplevel):
                 tag = "ambiguo"
             else:
                 tag = "pendiente"
-            self._tabla.insert(
-                "",
-                "end",
-                iid=iid,
-                values=(
+            filas.append((iid, registro, (
                     indice,
                     _texto(registro.get("usuario")),
                     _texto(registro.get("empresa")),
@@ -598,13 +704,33 @@ class VentanaValidacion(tk.Toplevel):
                     _texto(registro.get("area_actual")) or "—",
                     estado,
                     acciones.texto_acciones(registro),
-                ),
-                tags=(tag,),
-            )
-        self._actualizar_kpis()
+                ), tag))
+        inicio_visual = time.perf_counter()
+        lote = 150
 
-    def _actualizar_kpis(self) -> None:
-        resumen = self.revision.resumen()
+        def insertar(desde: int = 0) -> None:
+            if version != self._refresco_tabla_version:
+                return
+            hasta = min(desde + lote, len(filas))
+            for iid, _registro, valores, tag in filas[desde:hasta]:
+                self._tabla.insert("", "end", iid=iid, values=valores, tags=(tag,))
+            if hasta < len(filas):
+                self._pintado_tabla_after_id = self.after(1, insertar, hasta)
+                return
+            self._pintado_tabla_after_id = None
+            self._actualizar_kpis(config, resumen)
+            LOGGER.info(
+                "Rendimiento tabla_validacion: actualizacion_visual=%.3fs procesados=%s mostrados=%s",
+                time.perf_counter() - inicio_visual, resumen["total_usuarios"], len(registros),
+            )
+
+        self._pintado_tabla_after_id = self.after_idle(insertar)
+
+    def _actualizar_kpis(
+        self, config: Any = None, resumen: dict[str, int] | None = None
+    ) -> None:
+        if resumen is None:
+            resumen = self.revision.resumen()
         self._kpi_total.actualizar(
             valor=str(resumen["total_registros"]),
             detalle=f"{resumen['total_usuarios']} usuarios únicos",
@@ -622,7 +748,8 @@ class VentanaValidacion(tk.Toplevel):
         self._btn_parcial.configure(
             state="normal" if pendientes > 0 else "disabled"
         )
-        config = cargar_configuracion()
+        if config is None:
+            config = cargar_configuracion()
         if config.habilitado and config.configurada:
             if config.ultimo_estado == "conectado":
                 self._pill_sql.actualizar("SQL Server: conectado", "success")
@@ -1563,6 +1690,20 @@ class VentanaValidacion(tk.Toplevel):
         self._var_resumen.set(
             "La generación falló. La revisión sigue disponible para reintentar."
         )
+
+    def destroy(self) -> None:
+        for after_id in (
+            getattr(self, "_filtro_after_id", None),
+            getattr(self, "_pintado_tabla_after_id", None),
+        ):
+            if after_id is not None:
+                try:
+                    self.after_cancel(after_id)
+                except (tk.TclError, AttributeError):
+                    pass
+        self._filtro_after_id = None
+        self._pintado_tabla_after_id = None
+        super().destroy()
 
     def _cerrar(self) -> None:
         try:
@@ -2520,6 +2661,20 @@ class VentanaSeguimientoConsulta(tk.Toplevel):
                 pass
             self._after_id = None
         self.destroy()
+
+    def destroy(self) -> None:
+        for after_id in (
+            getattr(self, "_filtro_after_id", None),
+            getattr(self, "_pintado_tabla_after_id", None),
+        ):
+            if after_id is not None:
+                try:
+                    self.after_cancel(after_id)
+                except (tk.TclError, AttributeError):
+                    pass
+        self._filtro_after_id = None
+        self._pintado_tabla_after_id = None
+        super().destroy()
 
     def _cerrar(self) -> None:
         if self._corriendo and not messagebox.askyesno(

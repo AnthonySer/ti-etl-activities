@@ -17,6 +17,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Callable
@@ -892,13 +893,16 @@ class AplicacionTk(tk.Tk):
 
     def __init__(self) -> None:
         super().__init__()
+        self._inicio_carga_aplicacion = time.perf_counter()
         self.title(TITULO)
         self.geometry("1440x900")
         self.minsize(1100, 700)
         self.configure(bg=COLOR_FONDO)
 
         self._estado = svc_estado.cargar_estado()
-        self._maestro = svc_asignaciones.cargar_maestro()
+        # Se reemplaza por el snapshot cargado en segundo plano al completar
+        # el primer pintado. El objeto vacío mantiene disponibles las vistas.
+        self._maestro = svc_asignaciones.Maestro()
         self._preview_df: pd.DataFrame | None = None
         self._preview_info: dict[str, Any] | None = None
         self._ruta_preview: str | None = None
@@ -917,15 +921,20 @@ class AplicacionTk(tk.Tk):
         self._cola: queue.Queue[tuple[str, Any]] = queue.Queue()
         self._cola_after_id: str | None = None
         self._ocupado = False
+        self._eventos_pendientes: set[str] = set()
+        self._eventos_after_id: str | None = None
+        self._vistas_refresco_pendientes: set[str] = set()
+        self._refresco_cargando_maestro = False
+        self._refresco_version = 0
+        self._refresco_en_curso = False
+        self._refresco_inicio_after_id: str | None = None
+        self._carga_inicial_completa = False
+        self._pintado_after_ids: dict[str, str] = {}
+        self._pintado_versiones: dict[str, int] = {}
 
         self._crear_estilos()
         self._crear_cabecera()
         self._crear_pestanas()
-        self._refrescar_panel()
-        self._refrescar_usuarios()
-        self._refrescar_pendientes()
-        self._refrescar_maestro()
-        self._refrescar_auditoria()
         self._suscripciones_eventos = [
             svc_eventos.suscribir(
                 svc_eventos.ASIGNACION_REALIZADA, self._al_evento_datos
@@ -948,6 +957,136 @@ class AplicacionTk(tk.Tk):
             ),
         ]
         self._cola_after_id = self.after(120, self._procesar_cola)
+        self.after_idle(self._carga_inicial_diferida)
+
+    def _carga_inicial_diferida(self) -> None:
+        """Carga los datos iniciales fuera del hilo de Tkinter."""
+        self._iniciar_ocupado("Cargando información inicial…")
+        self._refrescar_panel()
+        self._solicitar_refresco_datos(
+            {"usuarios", "pendientes", "auditoria", "solicitantes"},
+            cargar_maestro=True,
+        )
+
+    def _solicitar_refresco_datos(
+        self, vistas: set[str], *, cargar_maestro: bool = False,
+        ruta_adicional: Path | None = None,
+    ) -> None:
+        """Agrupa lecturas solicitadas y prepara datos sin acceder a widgets."""
+        self._vistas_refresco_pendientes.update(vistas)
+        self._refresco_cargando_maestro |= cargar_maestro
+        if "solicitantes" in vistas:
+            self._ruta_adicional_solicitantes = ruta_adicional
+        self._refresco_version += 1
+        if not self._refresco_en_curso and self._refresco_inicio_after_id is None:
+            self._refresco_inicio_after_id = self.after(40, self._iniciar_refresco_datos_programado)
+
+    def _iniciar_refresco_datos_programado(self) -> None:
+        self._refresco_inicio_after_id = None
+        self._iniciar_refresco_datos()
+
+    def _iniciar_refresco_datos(self) -> None:
+        if self._refresco_en_curso or not self._vistas_refresco_pendientes:
+            return
+        self._refresco_en_curso = True
+        version = self._refresco_version
+        vistas = set(self._vistas_refresco_pendientes)
+        self._vistas_refresco_pendientes.clear()
+        cargar_maestro = self._refresco_cargando_maestro
+        self._refresco_cargando_maestro = False
+        maestro_base = self._maestro
+        filtro_usuarios = self._var_busqueda.get().strip()
+        manifiesto = self._ultimo_manifiesto
+        ruta_adicional = getattr(self, "_ruta_adicional_solicitantes", None)
+        self._ruta_adicional_solicitantes = None
+
+        def tarea() -> tuple[int, set[str], dict[str, Any]]:
+            inicio = time.perf_counter()
+            maestro = svc_asignaciones.cargar_maestro() if cargar_maestro else maestro_base
+            datos: dict[str, Any] = {"maestro": maestro if cargar_maestro else None}
+            conteos: dict[str, int] = {"maestro_leidos": len(maestro)}
+            if "usuarios" in vistas:
+                tabla = svc_asignaciones.tabla_usuarios(maestro, filtro_usuarios)
+                datos["usuarios"] = tabla.to_dict("records")
+                areas_df = maestro.como_dataframe()
+                datos["areas"] = sorted({
+                    str(v).strip() for v in areas_df[cfg.COLUMNA_AREA].tolist()
+                    if str(v).strip() and str(v).lower() != "nan"
+                }) if not areas_df.empty else []
+                conteos["usuarios"] = len(tabla)
+                conteos["usuarios_procesados"] = len(maestro)
+            if "pendientes" in vistas:
+                datos["pendientes"] = svc_asignaciones.usuarios_pendientes(manifiesto, maestro)
+                conteos["pendientes"] = len(datos["pendientes"])
+                conteos["pendientes_registros"] = len(datos["pendientes"])
+            if "auditoria" in vistas:
+                historial = auditoria.cargar_auditoria()
+                columnas = ("FECHA_HORA", "TIPO", "PERIODO", "LEIDOS", "VALIDOS",
+                            "OBSERVADOS", "NUEVOS", "MODIFICADOS", "ESTADO", "ARCHIVO_ORIGINAL")
+                datos["auditoria"] = [
+                    tuple(_texto(fila.get(col)) for col in columnas)
+                    for _, fila in historial.tail(300).iloc[::-1].iterrows()
+                ]
+                conteos["auditoria"] = len(datos["auditoria"])
+                conteos["auditoria_leidos"] = len(historial)
+            if "solicitantes" in vistas:
+                datos["solicitantes"] = self._preparar_solicitantes(ruta_adicional)
+                conteos["solicitantes"] = len(datos["solicitantes"].get("filas", []))
+            LOGGER.info(
+                "Rendimiento refresco_datos: vistas=%s preparacion=%.3fs registros=%s consultas=0 errores=%s",
+                ",".join(sorted(vistas)), time.perf_counter() - inicio, conteos,
+                int(bool(datos.get("solicitantes", {}).get("mensaje"))),
+            )
+            return version, vistas, datos
+
+        def ejecutar() -> None:
+            try:
+                resultado = tarea()
+            except Exception as exc:  # noqa: BLE001 - reportar por cola de UI
+                LOGGER.error("Error al preparar refresco de vistas (%s)", type(exc).__name__)
+                self._cola.put(("refresh_error", (version, exc)))
+            else:
+                self._cola.put(("refresh_ok", resultado))
+
+        threading.Thread(target=ejecutar, daemon=True).start()
+
+    def _finalizar_refresco_datos(
+        self, resultado: tuple[int, set[str], dict[str, Any]]
+    ) -> None:
+        version, _vistas, datos = resultado
+        self._refresco_en_curso = False
+        if datos.get("maestro") is not None:
+            self._maestro = datos["maestro"]
+            if hasattr(self, "_lbl_maestro"):
+                self._lbl_maestro.configure(text=self._texto_maestro())
+        if version == self._refresco_version:
+            if "usuarios" in datos:
+                self._pintar_usuarios(datos["usuarios"], datos.get("areas", []))
+            if "pendientes" in datos:
+                self._pintar_pendientes(datos["pendientes"])
+            if "auditoria" in datos:
+                self._pintar_auditoria(datos["auditoria"])
+            if "solicitantes" in datos:
+                self._pintar_solicitantes(datos["solicitantes"])
+            if not self._carga_inicial_completa:
+                self._carga_inicial_completa = True
+                LOGGER.info("Rendimiento carga_inicial_total: duración=%.3fs",
+                            time.perf_counter() - self._inicio_carga_aplicacion)
+                self._terminar_ocupado()
+        if self._vistas_refresco_pendientes:
+            self._iniciar_refresco_datos()
+
+    def _fallo_refresco_datos(self, contenido: tuple[int, Exception]) -> None:
+        version, exc = contenido
+        self._refresco_en_curso = False
+        LOGGER.error("No se pudo completar el refresco de datos (versión %s; %s)",
+                     version, type(exc).__name__)
+        self._pintar_estado_app("No se pudo actualizar una vista", "danger")
+        if not self._carga_inicial_completa:
+            self._refresco_cargando_maestro = True
+            self._terminar_ocupado()
+        if self._vistas_refresco_pendientes:
+            self._iniciar_refresco_datos()
 
     # ------------------------------------------------------------------
     # Actualización inmediata por eventos
@@ -956,40 +1095,78 @@ class AplicacionTk(tk.Tk):
         """Programa el refresco en el hilo de Tkinter sin bloquear el evento."""
 
         try:
-            self.after(0, self._aplicar_evento, dict(evento))
+            tema = str(evento.get("tema") or "")
+            self.after(0, self._encolar_evento, tema)
         except tk.TclError:  # la ventana ya se cerró
             pass
 
+    def _encolar_evento(self, tema: str) -> None:
+        self._eventos_pendientes.add(tema)
+        if self._eventos_after_id is None:
+            self._eventos_after_id = self.after(60, self._vaciar_eventos)
+
+    def _vaciar_eventos(self) -> None:
+        self._eventos_after_id = None
+        temas = self._eventos_pendientes
+        self._eventos_pendientes = set()
+        if temas:
+            self._aplicar_eventos(temas)
+
     def _aplicar_evento(self, evento: dict[str, Any]) -> None:
-        tema = str(evento.get("tema") or "")
+        self._aplicar_eventos({str(evento.get("tema") or "")})
+
+    def _aplicar_eventos(self, temas: set[str]) -> None:
         try:
-            if tema in {
+            refrescar_usuarios = bool(temas & {
                 svc_eventos.ASIGNACION_REALIZADA,
                 svc_eventos.USUARIO_ACTUALIZADO,
-            }:
-                self._refrescar_usuarios()
-                self._refrescar_pendientes()
+            }) or bool(temas & {svc_eventos.AREA_CREADA, svc_eventos.MAESTRO_ACTUALIZADO})
+            refrescar_maestro = bool(temas & {
+                svc_eventos.AREA_CREADA,
+                svc_eventos.CATALOGO_AREAS_ACTUALIZADO,
+                svc_eventos.MAESTRO_ACTUALIZADO,
+            })
+            refrescar_pendientes = bool(temas & {
+                svc_eventos.ASIGNACION_REALIZADA,
+                svc_eventos.USUARIO_ACTUALIZADO,
+                svc_eventos.AREA_CREADA,
+                svc_eventos.CONSULTA_SQL_FINALIZADA,
+            })
+            refrescar_panel = bool(temas & {
+                svc_eventos.ASIGNACION_REALIZADA,
+                svc_eventos.USUARIO_ACTUALIZADO,
+                svc_eventos.PROCESAMIENTO_FINALIZADO,
+                svc_eventos.CONSULTA_SQL_FINALIZADA,
+            })
+            vistas: set[str] = set()
+            if refrescar_usuarios:
+                vistas.add("usuarios")
+            if refrescar_pendientes:
+                vistas.add("pendientes")
+            if svc_eventos.ASIGNACION_REALIZADA in temas or svc_eventos.MAESTRO_ACTUALIZADO in temas:
+                vistas.add("auditoria")
+            if refrescar_maestro:
+                self._refrescar_maestro(refrescar_solicitantes=False)
+                vistas.add("solicitantes")
+            if refrescar_panel:
                 self._refrescar_panel()
-            elif tema == svc_eventos.AREA_CREADA:
-                self._refrescar_usuarios()
-                self._refrescar_maestro()
-                self._refrescar_pendientes()
-            elif tema == svc_eventos.CATALOGO_AREAS_ACTUALIZADO:
-                self._refrescar_maestro()
-            elif tema == svc_eventos.MAESTRO_ACTUALIZADO:
-                self._refrescar_maestro()
-                self._refrescar_usuarios()
-            elif tema == svc_eventos.PROCESAMIENTO_FINALIZADO:
-                self._refrescar_panel()
-            elif tema == svc_eventos.CONSULTA_SQL_FINALIZADA:
-                # La consulta SQL actualiza el caché de empleados y los
-                # pendientes; no obliga a reprocesar el archivo.
-                self._refrescar_pendientes()
-                self._refrescar_panel()
+            if vistas:
+                self._solicitar_refresco_datos(vistas)
         except Exception as exc:  # noqa: BLE001 - un refresco no rompe la app
-            LOGGER.error("No se pudo refrescar la interfaz para '%s': %s", tema, exc)
+            LOGGER.error("No se pudo refrescar la interfaz para eventos %s: %s", sorted(temas), exc)
 
     def destroy(self) -> None:
+        for after_id in (
+            getattr(self, "_eventos_after_id", None),
+            getattr(self, "_refresco_inicio_after_id", None),
+            getattr(self, "_cola_after_id", None),
+            *getattr(self, "_pintado_after_ids", {}).values(),
+        ):
+            if after_id is not None:
+                try:
+                    self.after_cancel(after_id)
+                except tk.TclError:
+                    pass
         for cancelar in getattr(self, "_suscripciones_eventos", []):
             try:
                 cancelar()
@@ -1712,6 +1889,8 @@ class AplicacionTk(tk.Tk):
         self._var_etapa.set("Esperando archivo validado.")
 
     def _previsualizar(self) -> None:
+        if self._ocupado:
+            return
         ruta_texto = self._var_archivo.get().strip()
         if not ruta_texto:
             messagebox.showwarning("Sin archivo", "Seleccione primero un archivo .xlsx.")
@@ -1723,16 +1902,23 @@ class AplicacionTk(tk.Tk):
             if self._ruta_preview == clave_ruta
             else None
         )
-        try:
+        self._iniciar_ocupado("Leyendo vista previa…")
+        inicio = time.perf_counter()
+
+        def tarea() -> Any:
             info = previsualizar(ruta, hoja=hoja_pedida)
-        except (ErrorArchivo, ErrorEstructura) as exc:
-            self._limpiar_validacion_archivo(f"Archivo no válido: {exc}")
-            self._var_etapa.set("Corrija el archivo antes de procesar.")
-            messagebox.showerror("Estructura no válida", str(exc))
-            return
-        except Exception as exc:  # noqa: BLE001
-            self._limpiar_validacion_archivo(f"No se pudo leer el archivo: {exc}")
-            messagebox.showerror("Error al leer el archivo", str(exc))
+            LOGGER.info(
+                "Rendimiento previsualizacion: duración=%.3fs registros=%s lecturas=1 escrituras=0",
+                time.perf_counter() - inicio, len(info.get("vista", ())),
+            )
+            return (clave_ruta, info)
+
+        self._ejecutar_hilo(tarea, self._mostrar_previsualizacion, "previsualización")
+
+    def _mostrar_previsualizacion(self, resultado: tuple[str, dict[str, Any]]) -> None:
+        clave_ruta, info = resultado
+        if clave_ruta != str(Path(self._var_archivo.get().strip()).resolve()):
+            self._terminar_ocupado()
             return
 
         self._preview_info = info
@@ -1763,9 +1949,13 @@ class AplicacionTk(tk.Tk):
                 _texto(fila.get(columna)) for columna in COLUMNAS_OFICIALES
             ]
             self._tabla_preview.insert("", "end", values=valores)
+        self._terminar_ocupado()
 
     def _procesar(self) -> None:
         if self._ocupado:
+            return
+        if not self._carga_inicial_completa:
+            messagebox.showinfo("Carga en curso", "Espere a que termine la carga inicial.")
             return
         ruta_texto = self._var_archivo.get().strip()
         if not ruta_texto:
@@ -1925,6 +2115,9 @@ class AplicacionTk(tk.Tk):
     def _asignar_desde_validacion(
         self, usuario: str, area: str, origen: str
     ) -> bool:
+        if not self._carga_inicial_completa:
+            messagebox.showinfo("Carga en curso", "Espere a que termine la carga inicial.")
+            return False
         # Las áreas manuales se validan con confirmación; las que provienen de
         # SQL se normalizan sin interrumpir el procesamiento por lotes.
         area_final = self._confirmar_area(usuario, area, preguntar=True)
@@ -2144,6 +2337,9 @@ class AplicacionTk(tk.Tk):
         *,
         asignaciones_revision: dict[str, str] | None = None,
     ) -> None:
+        if not self._carga_inicial_completa:
+            messagebox.showinfo("Carga en curso", "Espere a que termine la carga inicial.")
+            return
         ruta = Path(self._ruta_entrada_actual)
         hoja = self._hoja_entrada_actual
         nombre = "Excel a detalle" if modo == cfg.MODO_DETALLE else "Excel normal"
@@ -2368,48 +2564,38 @@ class AplicacionTk(tk.Tk):
         self._refrescar_usuarios()
 
     def _refrescar_usuarios(self) -> None:
-        try:
-            tabla = svc_asignaciones.tabla_usuarios(
-                self._maestro, self._var_busqueda.get()
-            )
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error("No se pudo listar usuarios: %s", exc)
-            return
-        self._limpiar_tabla(self._tabla_usuarios)
-        for _, fila in tabla.iterrows():
+        self._solicitar_refresco_datos({"usuarios"})
+
+    def _pintar_usuarios(self, registros: list[dict[str, Any]], areas: list[str]) -> None:
+        def insertar(fila: dict[str, Any]) -> None:
             self._tabla_usuarios.insert(
                 "",
                 "end",
                 values=(fila[cfg.COLUMNA_USUARIO], fila[cfg.COLUMNA_AREA]),
             )
-        self._combo_area.configure(values=self._areas_conocidas())
+        self._pintar_en_bloques("usuarios", self._tabla_usuarios, registros, insertar)
+        self._combo_area.configure(values=areas)
 
     def _refrescar_pendientes(self) -> None:
-        self._limpiar_tabla(self._tabla_pendientes)
-        if not self._ultimo_manifiesto:
-            return
-        try:
-            pendientes = svc_asignaciones.usuarios_pendientes(
-                self._ultimo_manifiesto, self._maestro
-            )
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error("No se pudieron leer los pendientes: %s", exc)
-            return
+        self._solicitar_refresco_datos({"pendientes"})
+
+    def _pintar_pendientes(self, pendientes: list[dict[str, Any]]) -> None:
+        filas: list[tuple[Any, ...]] = []
         for item in pendientes:
             sugerencia = ""
             if item["sugerencias"]:
                 mejor = item["sugerencias"][0]
                 sugerencia = f"{mejor['usuario']} ({mejor['similitud']:.0%}) → {mejor['area']}"
-            self._tabla_pendientes.insert(
-                "",
-                "end",
-                values=(
+            filas.append((
                     item["usuario"],
                     item["filas"],
                     item["area_preexistente"] or "—",
                     sugerencia or "Sin sugerencia",
-                ),
-            )
+                ))
+
+        def insertar(fila: tuple[Any, ...]) -> None:
+            self._tabla_pendientes.insert("", "end", values=fila)
+        self._pintar_en_bloques("pendientes", self._tabla_pendientes, filas, insertar)
 
     def _seleccionar_usuario(self, _evento=None) -> None:
         seleccion = self._tabla_usuarios.selection()
@@ -2488,6 +2674,9 @@ class AplicacionTk(tk.Tk):
         return pedir_decision_area(self, usuario, area, self._maestro)
 
     def _guardar_asignacion(self) -> None:
+        if not self._carga_inicial_completa:
+            messagebox.showinfo("Carga en curso", "Espere a que termine la carga inicial.")
+            return
         usuario = self._var_usuario.get().strip()
         area = self._var_area.get().strip()
         if not usuario or not area:
@@ -2919,16 +3108,23 @@ class AplicacionTk(tk.Tk):
         ).pack(anchor="w", pady=(12, 0))
         self._refrescar_copias()
 
-    def _refrescar_maestro(self) -> None:
+    def _refrescar_maestro(self, *, refrescar_solicitantes: bool = True) -> None:
         if not hasattr(self, "_lbl_maestro"):
             return
         self._lbl_maestro.configure(text=self._texto_maestro())
         self._refrescar_copias()
-        self._refrescar_solicitantes()
+        if refrescar_solicitantes:
+            self._refrescar_solicitantes()
 
     def _refrescar_solicitantes(self, ruta_adicional: Path | None = None) -> None:
         if not hasattr(self, "_tabla_solicitantes"):
             return
+        self._solicitar_refresco_datos(
+            {"solicitantes"}, ruta_adicional=ruta_adicional
+        )
+
+    @staticmethod
+    def _preparar_solicitantes(ruta_adicional: Path | None = None) -> dict[str, Any]:
         try:
             ruta_maestro = Path(cfg.MAESTRO_TICKETS_XLSX)
             maestro = (
@@ -2943,28 +3139,40 @@ class AplicacionTk(tk.Tk):
                     ruta_adicional
                 )
             filas = svc_solicitantes.detectar_solicitantes(maestro, adicionales)
-        except (ErrorArchivo, ErrorEstructura, OSError, ValueError) as exc:
-            LOGGER.error("No se pudo auditar solicitantes: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - aislamos el fallo de esta vista
+            LOGGER.error("No se pudo auditar solicitantes (%s)", type(exc).__name__)
             detalle = ""
             if ruta_adicional is not None:
-                diagnostico = MaestroTickets.inspeccionar_hojas(ruta_adicional)
-                detalle = (
-                    f" Archivo: {diagnostico.get('archivo')}. "
-                    f"Hojas: {', '.join(diagnostico.get('hojas') or []) or 'ninguna'}. "
-                    f"Hoja esperada: {diagnostico.get('hoja_esperada')}."
-                )
-            self._var_info_solicitantes.set(
-                f"Auditoría de solicitantes pendiente: {exc}.{detalle}"
-            )
-            return
+                try:
+                    diagnostico = MaestroTickets.inspeccionar_hojas(ruta_adicional)
+                    detalle = (
+                        f" Archivo: {diagnostico.get('archivo')}. "
+                        f"Hojas: {', '.join(diagnostico.get('hojas') or []) or 'ninguna'}. "
+                        f"Hoja esperada: {diagnostico.get('hoja_esperada')}."
+                    )
+                except Exception:
+                    detalle = ""
+            return {"filas": [], "mensaje": f"Auditoría de solicitantes pendiente: {exc}.{detalle}"}
 
+        return {"filas": filas, "aviso_hoja": aviso_hoja, "mensaje": ""}
+
+    def _pintar_solicitantes(self, resultado: dict[str, Any]) -> None:
+        filas = resultado.get("filas", [])
         self._solicitantes_por_iid.clear()
-        self._limpiar_tabla(self._tabla_solicitantes)
         pendientes = 0
         genericos = 0
+        para_pintar: list[tuple[str, dict[str, Any]]] = []
         for indice, fila in enumerate(filas):
             iid = f"solicitante-{indice}"
             self._solicitantes_por_iid[iid] = fila
+            para_pintar.append((iid, fila))
+            if fila["accion"] == "Pendiente":
+                pendientes += 1
+            if fila["generico"]:
+                genericos += 1
+
+        def insertar(registro: tuple[str, dict[str, Any]]) -> None:
+            iid, fila = registro
             self._tabla_solicitantes.insert(
                 "",
                 "end",
@@ -2977,18 +3185,19 @@ class AplicacionTk(tk.Tk):
                     fila["accion"],
                 ),
             )
-            if fila["accion"] == "Pendiente":
-                pendientes += 1
-            if fila["generico"]:
-                genericos += 1
+        self._pintar_en_bloques(
+            "solicitantes", self._tabla_solicitantes, para_pintar, insertar
+        )
         mensaje = (
             f"{len(filas)} solicitantes revisados | "
             f"{pendientes} coincidencias requieren decisión | "
             f"{genericos} solicitantes genéricos protegidos. "
             "Las sugerencias no fusionan ni modifican los nombres originales."
         )
-        if aviso_hoja:
-            mensaje += f" {aviso_hoja}"
+        if resultado.get("mensaje"):
+            mensaje = resultado["mensaje"]
+        elif resultado.get("aviso_hoja"):
+            mensaje += f" {resultado['aviso_hoja']}"
         self._var_info_solicitantes.set(mensaje)
 
     def _solicitante_seleccionado(self) -> dict[str, Any] | None:
@@ -3704,33 +3913,14 @@ class AplicacionTk(tk.Tk):
         )
 
     def _refrescar_auditoria(self) -> None:
+        self._solicitar_refresco_datos({"auditoria"})
+
+    def _pintar_auditoria(self, filas: list[tuple[str, ...]]) -> None:
         if not hasattr(self, "_tabla_auditoria"):
             return
-        self._limpiar_tabla(self._tabla_auditoria)
-        try:
-            historial = auditoria.cargar_auditoria()
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error("No se pudo leer la auditoría: %s", exc)
-            return
-        if historial.empty:
-            return
-        for _, fila in historial.tail(300).iloc[::-1].iterrows():
-            self._tabla_auditoria.insert(
-                "",
-                "end",
-                values=tuple(_texto(fila.get(columna)) for columna in (
-                    "FECHA_HORA",
-                    "TIPO",
-                    "PERIODO",
-                    "LEIDOS",
-                    "VALIDOS",
-                    "OBSERVADOS",
-                    "NUEVOS",
-                    "MODIFICADOS",
-                    "ESTADO",
-                    "ARCHIVO_ORIGINAL",
-                )),
-            )
+        def insertar(fila: tuple[str, ...]) -> None:
+            self._tabla_auditoria.insert("", "end", values=fila)
+        self._pintar_en_bloques("auditoria", self._tabla_auditoria, filas, insertar)
 
     def _abrir_auditoria(self) -> None:
         if not Path(cfg.AUDITORIA_CSV).exists():
@@ -3860,6 +4050,47 @@ class AplicacionTk(tk.Tk):
         for elemento in tabla.get_children():
             tabla.delete(elemento)
 
+    def _pintar_en_bloques(
+        self,
+        nombre: str,
+        tabla: ttk.Treeview,
+        registros: list[Any],
+        insertar: Callable[[Any], None],
+        *,
+        al_terminar: Callable[[], None] | None = None,
+    ) -> None:
+        """Inserta filas en tandas para devolver tiempo al bucle de Tk."""
+        anterior = self._pintado_after_ids.pop(nombre, None)
+        if anterior is not None:
+            try:
+                self.after_cancel(anterior)
+            except tk.TclError:
+                pass
+        version = self._pintado_versiones.get(nombre, 0) + 1
+        self._pintado_versiones[nombre] = version
+        self._limpiar_tabla(tabla)
+        inicio = time.perf_counter()
+        tamano_lote = 150
+
+        def pintar(desde: int = 0) -> None:
+            if self._pintado_versiones.get(nombre) != version:
+                return
+            hasta = min(desde + tamano_lote, len(registros))
+            for registro in registros[desde:hasta]:
+                insertar(registro)
+            if hasta < len(registros):
+                self._pintado_after_ids[nombre] = self.after(1, pintar, hasta)
+                return
+            self._pintado_after_ids.pop(nombre, None)
+            LOGGER.info(
+                "Rendimiento vista_%s: actualizacion_visual=%.3fs mostrados=%s",
+                nombre, time.perf_counter() - inicio, len(registros),
+            )
+            if al_terminar is not None:
+                al_terminar()
+
+        self._pintado_after_ids[nombre] = self.after_idle(pintar)
+
     def _iniciar_ocupado(self, mensaje: str) -> None:
         self._ocupado = True
         texto = f"Trabajando: {mensaje}"
@@ -3922,6 +4153,14 @@ class AplicacionTk(tk.Tk):
                         if panel is not None:
                             panel.set_estado_sistema("REVISAR EJECUCIÓN", "danger")
                         messagebox.showerror("Error al actualizar", str(exc))
+                elif tipo == "refresh_ok":
+                    try:
+                        self._finalizar_refresco_datos(contenido)
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.exception("Error al actualizar vistas preparadas")
+                        self._fallo_refresco_datos((contenido[0], exc))
+                elif tipo == "refresh_error":
+                    self._fallo_refresco_datos(contenido)
                 elif tipo == "error":
                     descripcion, exc = contenido
                     self._terminar_ocupado()
