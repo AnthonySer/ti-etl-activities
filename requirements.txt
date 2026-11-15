@@ -1,5 +1,6 @@
 pandas>=2.0
 openpyxl>=3.1
 pyodbc>=5.0
+sqlglot>=26.0
 python-docx>=1.2.0
 lxml>=6.1.3

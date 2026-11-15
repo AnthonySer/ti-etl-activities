@@ -74,6 +74,72 @@ def _tabla(base: str, esquema: str, tabla: str) -> str:
         f"[{validar_esquema(esquema)}]."
         f"[{validar_identificador(tabla, 'tabla')}]"
     )
+def sql_empleados_serviam_estructurada(
+    criterios: Iterable[tuple[str, Iterable[str]]],
+) -> tuple[str, list[str]]:
+    """Busca detalles MDA por NOMBRE y por partes, sin depender del orden."""
+
+    grupos: list[str] = []
+    parametros: list[str] = []
+    for nombre, terminos in criterios:
+        tokens = [str(item).strip() for item in terminos if str(item or "").strip()]
+        patron_nombre = f"%{nombre}%" if str(nombre or "").strip() else ""
+        expresion_partes = (
+            "CONCAT(ISNULL(NOMBRE_PILA, ''), ' ', "
+            "ISNULL(PRIMER_APELLIDO, ''), ' ', ISNULL(SEGUNDO_APELLIDO, ''))"
+        )
+        alternativas: list[str] = []
+        if patron_nombre:
+            alternativas.append("NOMBRE LIKE ?")
+            parametros.append(patron_nombre)
+        if tokens:
+            partes = " AND ".join(f"{expresion_partes} LIKE ?" for _ in tokens)
+            alternativas.append(f"({partes})")
+            parametros.extend(f"%{token}%" for token in tokens)
+        if alternativas:
+            grupos.append("(" + " OR ".join(alternativas) + ")")
+    if not grupos:
+        raise ValueError("La consulta SERVIAM requiere nombre o términos seleccionados.")
+    sql = (
+        "SELECT NOMBRE, NOMBRE_PILA, PRIMER_APELLIDO, SEGUNDO_APELLIDO, "
+        "DEPARTAMENTO, U_CORREO_CORP, ACTIVO, PUESTO, E_MAIL "
+        "FROM [Serviam_GP].[MDA].[VW_EMPLEADOS_MDA] WHERE "
+        + " OR ".join(grupos)
+    )
+    return sql, parametros
+
+
+def sql_departamentos_serviam(codigo: str) -> tuple[str, list[str]]:
+    """Consulta oficial del catálogo de departamentos MDA de SERVIAM."""
+
+    return (
+        "SELECT ESQUEMA_ORIGEN, DEPARTAMENTO, DESCRIPCION, JEFE, ACTIVO "
+        "FROM [Serviam_GP].[MDA].[VW_DEPARTAMENTOS_MDA] "
+        "WHERE DEPARTAMENTO = ?",
+        [codigo],
+    )
+
+
+def sql_departamento_exactus(
+    *, base_datos: str, esquema: str, codigo: str,
+    columnas_disponibles: Mapping[str, Iterable[str]],
+) -> tuple[str, list[str]]:
+    """Consulta DEPARTAMENTO solo con columnas confirmadas por metadatos."""
+
+    esquema = validar_esquema(esquema)
+    columnas = _columnas_por_tabla(columnas_disponibles).get(TABLA_DEPARTAMENTO, set())
+    if "DEPARTAMENTO" not in columnas or "DESCRIPCION" not in columnas:
+        raise EsquemaInsuficiente(
+            f"{esquema}.DEPARTAMENTO no expone DEPARTAMENTO y DESCRIPCION."
+        )
+    opcionales = [campo for campo in ("JEFE", "ACTIVO") if campo in columnas]
+    seleccion = ["DEPARTAMENTO", "DESCRIPCION", *opcionales]
+    tabla = _tabla(base_datos, esquema, TABLA_DEPARTAMENTO)
+    sql = (
+        "SELECT " + ", ".join(f"[{campo}]" for campo in seleccion)
+        + f" FROM {tabla} WHERE [DEPARTAMENTO] = ?"
+    )
+    return sql, [codigo]
 
 
 def _limpiar(expresion: str) -> str:
