@@ -11,6 +11,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Mapping, Sequence
 
 from core.actualizador_graficos_docx import SerieGraficoDocx
+from core.estadisticas_informe_docx import area_canonica_informe
 from core.lector_informe_docx import _vacio
 from core.modelo_informe_docx import DatosInforme, EstadisticasInforme, RegistroInforme
 
@@ -61,7 +62,7 @@ def _categoria_visible(categoria: str | None, actividad_original: object) -> str
 
 def _registro_detalle(registro: RegistroInforme) -> tuple[str, str, str, str, str, str]:
     fecha = registro.fecha.strftime("%d/%m/%Y") if registro.fecha is not None else ""
-    area = _ETIQUETA_AREA_VACIA if _vacio(registro.area_original) else str(registro.area_original)
+    area = area_canonica_informe(registro.area_original) or _ETIQUETA_AREA_VACIA
     horas = _numero(registro.horas) if registro.horas is not None else ""
     return (
         _categoria_visible(registro.categoria, registro.actividad_original),

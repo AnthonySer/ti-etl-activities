@@ -188,6 +188,80 @@ class TestActualizadorTextosDocxFase2(unittest.TestCase):
         self.assertEqual(resultado["agosto de 2026"], 1)
         self.assertEqual(parrafo.runs[1].font.highlight_color, WD_COLOR_INDEX.YELLOW)
 
+    def test_periodo_identico_es_valido_y_no_cambia_formato_ni_contenido(self):
+        documento = Document()
+        parrafo = documento.add_paragraph()
+        parrafo.add_run("Periodo: ")
+        resaltado = parrafo.add_run("agosto 2026")
+        resaltado.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        parrafo.add_run("; agosto 2026; enero 2027")
+
+        resultado = reemplazar_marcadores_docx(
+            documento,
+            {"agosto 2026": "agosto 2026", "enero 2027": "enero 2027"},
+        )
+
+        self.assertEqual(parrafo.text, "Periodo: agosto 2026; agosto 2026; enero 2027")
+        self.assertEqual(resultado["agosto 2026"], 2)
+        self.assertEqual(resultado["enero 2027"], 1)
+        self.assertEqual(parrafo.runs[1].font.highlight_color, WD_COLOR_INDEX.YELLOW)
+
+    def test_periodos_con_y_sin_preposicion_y_cambio_de_anio(self):
+        documento = Document()
+        documento.add_paragraph("agosto 2026 / agosto de 2026 / agosto 2026")
+        resultado = reemplazar_marcadores_docx(
+            documento,
+            {
+                "agosto de 2026": "septiembre de 2026",
+                "agosto 2026": "enero 2027",
+            },
+        )
+
+        self.assertEqual(
+            documento.paragraphs[0].text,
+            "enero 2027 / septiembre de 2026 / enero 2027",
+        )
+        self.assertEqual(resultado["agosto de 2026"], 1)
+        self.assertEqual(resultado["agosto 2026"], 2)
+
+    def test_variante_con_preposicion_igual_es_valida_y_preserva_runs(self):
+        documento = Document()
+        parrafo = documento.add_paragraph()
+        run = parrafo.add_run("agosto de 2026")
+        run.bold = True
+
+        resultado = reemplazar_marcadores_docx(
+            documento, {"agosto de 2026": "agosto de 2026"}
+        )
+
+        self.assertEqual(parrafo.text, "agosto de 2026")
+        self.assertEqual(resultado["agosto de 2026"], 1)
+        self.assertTrue(parrafo.runs[0].bold)
+
+    def test_doce_meses_y_cambio_de_anio(self):
+        meses = (
+            "enero", "febrero", "marzo", "abril", "mayo", "junio",
+            "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+        )
+        for mes in meses:
+            with self.subTest(mes=mes):
+                documento = Document()
+                documento.add_paragraph(f"{mes} 2026")
+                reemplazar_marcadores_docx(
+                    documento, {f"{mes} 2026": "enero 2027"}
+                )
+                self.assertEqual(documento.paragraphs[0].text, "enero 2027")
+
+    def test_reemplazo_que_contiene_marcador_sigue_fallando(self):
+        documento = Document()
+        documento.add_paragraph("agosto 2026")
+
+        with self.assertRaisesRegex(ErrorMarcadorDocx, "vuelve a contener"):
+            reemplazar_marcadores_docx(
+                documento, {"agosto 2026": "septiembre agosto 2026"}
+            )
+        self.assertEqual(documento.paragraphs[0].text, "agosto 2026")
+
     def test_falla_si_falta_un_marcador_requerido(self):
         documento = Document()
         documento.add_paragraph("Sin texto variable")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+import hashlib
 from pathlib import Path
 import sys
 import tempfile
@@ -26,6 +27,7 @@ from core.esquema import COLUMNAS_OFICIALES
 
 PLANTILLA = BASE_DIR / "plantillas" / "anexo_5_plantilla.docx"
 EXCEL_REAL = BASE_DIR / "output" / "consulta_septiembre_2026_procesado.xlsx"
+EXCEL_AGOSTO = BASE_DIR / "output" / "consulta_agosto_2026_procesado.xlsx"
 
 
 def fila(**cambios):
@@ -57,6 +59,55 @@ def crear_excel(ruta: Path, registros):
 
 
 class TestProyectorAnexo5Docx(unittest.TestCase):
+    def test_generacion_integrada_agosto_coincidente_con_plantilla(self):
+        if not EXCEL_AGOSTO.is_file():
+            self.skipTest("No está disponible el Excel procesado de agosto.")
+        hash_plantilla = hashlib.sha256(PLANTILLA.read_bytes()).hexdigest()
+        datos = leer_excel_informe(EXCEL_AGOSTO)
+        stats = calcular_estadisticas_informe(datos)
+        contenido = preparar_contenido_anexo5(datos, stats)
+        self.assertEqual(stats.periodo, (2026, 8))
+
+        with tempfile.TemporaryDirectory(prefix="anexo5-integracion-agosto-") as carpeta:
+            salida = Path(carpeta) / "Anexo5_agosto.docx"
+            resultado = generar_anexo5_docx(
+                PLANTILLA,
+                salida,
+                reemplazos_texto=contenido.reemplazos_texto,
+                filas_por_tabla=contenido.filas_por_tabla,
+                totales_por_tabla=contenido.totales_por_tabla,
+                series_por_grafico=contenido.series_por_grafico,
+            )
+            doc = Document(salida)
+            tablas = localizar_tablas_docx(doc)
+            self.assertEqual(len(doc.inline_shapes), 4)
+            self.assertEqual(set(tablas), {"resumen_tipo_atencion", "proyectos", "tickets_tipo", "areas", "detalle"})
+            for nombre, filas in contenido.filas_por_tabla.items():
+                self.assertEqual(len(tablas[nombre].rows), len(filas) + 1 + (nombre != "detalle"))
+                esperadas = list(filas)
+                if nombre != "detalle":
+                    esperadas.append(contenido.totales_por_tabla[nombre])
+                actuales = [tuple(celda.text for celda in fila.cells) for fila in tablas[nombre].rows[1:]]
+                self.assertEqual(actuales, [tuple(str(valor) for valor in fila) for fila in esperadas])
+            self.assertEqual(len(resultado.puntos_por_grafico), 4)
+            for numero, serie in contenido.series_por_grafico.items():
+                self.assertEqual(dict(resultado.puntos_por_grafico)[numero], len(serie.categorias))
+
+            texto = "\n".join(p.text for p in doc.paragraphs)
+            self.assertIn("agosto 2026", texto)
+            self.assertIn("agosto de 2026", texto)
+            self.assertNotIn("septiembre", texto.casefold())
+            with ZipFile(salida) as paquete:
+                self.assertIsNone(paquete.testzip())
+                xml_textos = [
+                    paquete.read(nombre).decode("utf-8", errors="ignore").casefold()
+                    for nombre in paquete.namelist()
+                    if nombre.endswith((".xml", ".rels"))
+                ]
+                self.assertEqual(sum(n.startswith("word/charts/chart") and n.endswith(".xml") for n in paquete.namelist()), 4)
+                self.assertFalse(any("septiembre 2026" in xml for xml in xml_textos))
+        self.assertEqual(hashlib.sha256(PLANTILLA.read_bytes()).hexdigest(), hash_plantilla)
+
     def test_real_septiembre_incluye_las_21_areas_de_ticket_y_las_179_filas(self):
         if not EXCEL_REAL.is_file():
             self.skipTest("No está disponible el Excel procesado de septiembre.")
