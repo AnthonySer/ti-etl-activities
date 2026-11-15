@@ -47,6 +47,7 @@ from core import revision as svc_revision
 from core import solicitantes as svc_solicitantes
 from core.archivos import ErrorArchivo, ErrorEstructura, leer_excel
 from core.bloqueo import ErrorBloqueo, esta_bloqueado, bloqueo
+from core.integridad_excel import ErrorCambioExterno, RegistroHuellas
 from core.consolidacion_tickets import consolidar_procesado
 from core.esquema import COLUMNAS_OFICIALES, C_FECHA, C_HORAS, C_SOLICITANTE
 from core.etl import previsualizar
@@ -1923,14 +1924,12 @@ class AplicacionTk(tk.Tk):
 
     def _asignar_desde_validacion(
         self, usuario: str, area: str, origen: str
-    ) -> None:
+    ) -> bool:
         # Las áreas manuales se validan con confirmación; las que provienen de
         # SQL se normalizan sin interrumpir el procesamiento por lotes.
-        area_final = self._confirmar_area(
-            usuario, area, preguntar=(origen == procedencia.MANUAL)
-        )
+        area_final = self._confirmar_area(usuario, area, preguntar=True)
         if not area_final:
-            return
+            return False
         try:
             with bloqueo("actualización de usuarios y áreas"):
                 svc_asignaciones.asignar_una(
@@ -1939,6 +1938,41 @@ class AplicacionTk(tk.Tk):
                     area_final,
                     usuario_ejecutor=os.getenv("USERNAME", ""),
                 )
+        except ErrorCambioExterno as exc:
+            if not messagebox.askyesno(
+                "El maestro cambió en disco",
+                f"{exc}\n\n¿Recargar el Excel maestro actualizado y volver "
+                "a aplicar esta asignación conservando los demás cambios?",
+            ):
+                return False
+            try:
+                with bloqueo("recarga y actualización del maestro"):
+                    maestro_actual = svc_asignaciones.Maestro.cargar(
+                        cfg.MAESTRO_XLSX,
+                        cfg.MAESTRO_CSV,
+                        verificar_consistencia=False,
+                    )
+                    area_actual = maestro_actual.buscar(usuario) or ""
+                    if area_actual and area_actual.casefold() != area_final.casefold():
+                        if not messagebox.askyesno(
+                            "El usuario ya tiene otra área",
+                            f"En el Excel actualizado, {usuario} tiene el área "
+                            f"'{area_actual}'. ¿Desea cambiarla a '{area_final}'?",
+                        ):
+                            return False
+                    huellas = RegistroHuellas()
+                    huellas.guardar(cfg.MAESTRO_XLSX)
+                    svc_asignaciones.asignar_una(
+                        maestro_actual,
+                        usuario,
+                        area_final,
+                        usuario_ejecutor=os.getenv("USERNAME", ""),
+                        registro=huellas,
+                    )
+                    self._maestro.reemplazar_con(maestro_actual)
+            except Exception as reintento_exc:  # noqa: BLE001
+                LOGGER.exception("No se pudo guardar tras recargar el Excel maestro")
+                raise reintento_exc
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(
                 "No se pudo guardar el área",
@@ -1952,6 +1986,7 @@ class AplicacionTk(tk.Tk):
         self._var_info_usuario.set(
             f"Asignación guardada: {usuario} → {area_final} ({origen})"
         )
+        return True
 
     def _reanudar_revision(self) -> None:
         from core import revision as svc_revision
@@ -2448,32 +2483,9 @@ class AplicacionTk(tk.Tk):
             return resultado.area_reutilizable or resultado.nombre
         if not preguntar:
             return resultado.nombre
+        from ventana_validacion import pedir_decision_area
 
-        if resultado.similares:
-            similar = resultado.similares[0]
-            if messagebox.askyesno(
-                "Área parecida",
-                f"Ya existe el área '{similar.nombre}' "
-                f"({similar.similitud:.0%} de similitud).\n\n"
-                f"¿Desea reutilizar '{similar.nombre}' en lugar de crear "
-                f"'{resultado.nombre}'?",
-            ):
-                return similar.nombre
-            if not messagebox.askyesno(
-                "Confirmar área nueva",
-                f"'{resultado.nombre}' es parecida a '{similar.nombre}', pero "
-                "distinta.\n\n¿Registrarla como área nueva?",
-            ):
-                return None
-            return resultado.nombre
-
-        if not messagebox.askyesno(
-            "Confirmar área nueva",
-            f"El área '{resultado.nombre}' no existe en el maestro.\n\n"
-            f"¿Registrarla y asignarla a '{usuario}'?",
-        ):
-            return None
-        return resultado.nombre
+        return pedir_decision_area(self, usuario, area, self._maestro)
 
     def _guardar_asignacion(self) -> None:
         usuario = self._var_usuario.get().strip()

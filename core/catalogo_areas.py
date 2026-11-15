@@ -16,6 +16,7 @@ Antes de escribir se valida:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any, Iterable, Sequence
 
 from core import eventos, similitud
@@ -113,6 +114,14 @@ def buscar_similares(
         if otra == clave:
             continue
         puntaje = similitud.comparar(clave, otra)
+        # Reconoce abreviaturas formadas por iniciales, incluidas formas
+        # habituales como "RR HH" para "RECURSOS HUMANOS". Solo se considera
+        # coincidencia cuando la abreviatura completa coincide exactamente
+        # con las iniciales del nombre del área.
+        siglas_consulta = _siglas(clave)
+        siglas_area = _siglas(otra, iniciales=True)
+        if siglas_consulta and siglas_consulta == siglas_area:
+            puntaje = max(puntaje, 0.98)
         if puntaje >= umbral:
             similares.append(
                 AreaSimilar(
@@ -123,6 +132,16 @@ def buscar_similares(
             )
     similares.sort(key=lambda item: item.similitud, reverse=True)
     return similares
+
+
+def _siglas(valor: str, *, iniciales: bool = False) -> str:
+    """Normaliza abreviaturas colapsando letras repetidas por puntuación."""
+
+    tokens = re.findall(r"[A-Z0-9]+", str(valor or "").upper())
+    if iniciales:
+        return "".join(token[0] for token in tokens if token)
+    letras = "".join(tokens)
+    return re.sub(r"(.)\1+", r"\1", letras)
 
 
 def validar_area(

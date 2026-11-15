@@ -378,17 +378,30 @@ class RepositorioEmpleados:
         if not patrones:
             return resultado
 
+        _avisar(al_progreso, seguimiento.nuevo_evento(
+            "UNION ALL", seguimiento.ESTADO_CONSULTANDO,
+            detalle="Verificando estructura y columnas de las empresas…",
+        ))
         try:
             capacidades = self._leer_capacidades_consolidadas()
         except Exception as exc:  # noqa: BLE001 - consulta principal indivisible
             error = _clasificar_error_consulta(exc, "EXACTUS")
             resultado.errores.append(error)
+            _avisar(al_progreso, seguimiento.nuevo_evento(
+                "UNION ALL", seguimiento.estado_desde_error(error["categoria"]),
+                resultados=0, detalle=error["mensaje"],
+            ))
             for empresa in EMPRESAS:
                 _avisar(al_progreso, seguimiento.nuevo_evento(
                     empresa, seguimiento.estado_desde_error(error["categoria"]),
                     resultados=0, detalle=error["mensaje"],
                 ))
             return resultado
+
+        _avisar(al_progreso, seguimiento.nuevo_evento(
+            "UNION ALL", seguimiento.ESTADO_CONSULTANDO,
+            detalle="Estructura verificada. Preparando búsqueda consolidada…",
+        ))
 
         for empresa in EMPRESAS:
             _avisar(al_progreso, seguimiento.nuevo_evento(
@@ -417,6 +430,11 @@ class RepositorioEmpleados:
                     detalle="No tiene las columnas necesarias para la búsqueda consolidada.",
                 ))
         if not disponibles:
+            _avisar(al_progreso, seguimiento.nuevo_evento(
+                "UNION ALL", seguimiento.ESTADO_SIN_ESQUEMA,
+                resultados=0,
+                detalle="No hay empresas con columnas verificadas para buscar.",
+            ))
             return resultado
 
         # Una sola búsqueda principal. Los metadatos no consultan ni buscan
@@ -475,6 +493,32 @@ class RepositorioEmpleados:
                 continue
             registro = {"EMPLEADO": codigo, "NOMBRE": nombre, "FUENTE": empresa}
             hits[empresa].setdefault(codigo, registro)
+        _avisar(al_progreso, seguimiento.nuevo_evento(
+            "UNION ALL", seguimiento.ESTADO_COMPLETADA,
+            resultados=len(filas_principales),
+            duracion=time.perf_counter() - inicio_total,
+            detalle=(
+                f"Búsqueda principal finalizada: {len(filas_principales)} fila(s). "
+                "Recuperando departamento y puesto de las coincidencias…"
+            ),
+        ))
+        for empresa, por_codigo in hits.items():
+            if not por_codigo:
+                _avisar(al_progreso, seguimiento.nuevo_evento(
+                    empresa, seguimiento.ESTADO_SIN_RESULTADOS,
+                    resultados=0,
+                    duracion=time.perf_counter() - inicio_total,
+                    detalle="Sin coincidencias en la búsqueda consolidada.",
+                ))
+            else:
+                _avisar(al_progreso, seguimiento.nuevo_evento(
+                    empresa, seguimiento.ESTADO_CONSULTANDO,
+                    resultados=len(por_codigo),
+                    detalle=(
+                        f"{len(por_codigo)} coincidencia(s); consultando datos "
+                        "complementarios y departamento…"
+                    ),
+                ))
         # Asociar las filas a cada plan por su patrón y conservar candidatos
         # distintos de todas las empresas (incluidos códigos repetidos).
         candidatos_por_clave: dict[str, list[Empleado]] = {str(item.get("clave") or ""): [] for item in consultas}
@@ -541,6 +585,8 @@ class RepositorioEmpleados:
                 detalles_por_empresa[empresa] = {}
 
         for empresa, por_codigo in hits.items():
+            if not por_codigo:
+                continue
             for codigo, base in por_codigo.items():
                 detalle = dict(base)
                 detalle.update(detalles_por_empresa.get(empresa, {}).get(codigo, {}))
@@ -596,20 +642,19 @@ class RepositorioEmpleados:
                             continue
                     resultado.por_consulta.setdefault(clave, []).append(empleado)
 
-        resultado.empresas_consultadas = disponibles
-        resultado.empresas_sin_datos = [empresa for empresa in disponibles if not hits[empresa]]
-        for empresa in disponibles:
-            total = len(hits[empresa])
             _avisar(al_progreso, seguimiento.nuevo_evento(
                 empresa,
-                seguimiento.ESTADO_COMPLETADA if total else seguimiento.ESTADO_SIN_RESULTADOS,
-                resultados=total,
-                duracion=resultado.duracion_total,
+                seguimiento.ESTADO_COMPLETADA,
+                resultados=len(por_codigo),
+                duracion=time.perf_counter() - inicio_total,
                 detalle=(
-                    f"{total} coincidencia(s); enriquecimiento posterior por código."
-                    if total else "Sin coincidencias en la búsqueda consolidada."
+                    f"{len(por_codigo)} empleado(s) enriquecido(s) con los datos "
+                    "disponibles."
                 ),
             ))
+
+        resultado.empresas_consultadas = disponibles
+        resultado.empresas_sin_datos = [empresa for empresa in disponibles if not hits[empresa]]
         resultado.duracion_total = time.perf_counter() - inicio_total
         return resultado
 
