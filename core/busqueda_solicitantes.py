@@ -102,17 +102,21 @@ class PlanBusqueda:
         }
 
     def con_orden(self, terminos: Sequence[Any]) -> "PlanBusqueda":
-        """Valida el orden elegido y devuelve un plan manual.
+        """Valida el orden y selección elegidos y devuelve un plan manual.
 
-        El usuario solo puede reordenar los términos detectados; no puede
-        agregar, quitar ni alterar palabras desde la interfaz.
+        La UI puede excluir términos ruidosos, pero no inventarlos ni
+        modificarlos. Se requiere al menos un término.
         """
 
         propuestos = [str(termino or "").strip().upper() for termino in terminos]
         propuestos = [termino for termino in propuestos if termino]
-        if sorted(propuestos) != sorted(self.terminos):
+        disponibles = list(self.terminos_originales or self.terminos)
+        if not propuestos or any(
+            propuestos.count(termino) > disponibles.count(termino)
+            for termino in set(propuestos)
+        ):
             raise ValueError(
-                "El nuevo orden debe contener exactamente los mismos términos."
+                "Seleccione al menos un término detectado y no lo repita."
             )
         return replace(self, terminos=tuple(propuestos), modo=MODO_MANUAL)
 
