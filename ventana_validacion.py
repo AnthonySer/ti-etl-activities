@@ -798,6 +798,23 @@ class VentanaValidacion(tk.Toplevel):
             # inmediato la selección manual.
             if not cancelada and len(registros) == 1 and len(ambiguos) == 1:
                 self.after(10, lambda: self._abrir_seleccion(ambiguos[0]))
+            elif not cancelada and len(registros) == 1 and not resumen.get("empleados", 0):
+                self.after(10, lambda: self._abrir_seleccion(registros[0]))
+
+    def _confirmar_y_cerrar_seguimiento(
+        self,
+        ventana: "VentanaSeguimientoConsulta",
+        registro: dict[str, Any],
+        candidato: dict[str, Any],
+        resolucion: Any,
+    ) -> bool:
+        asignada = self._confirmar_o_pedir_area(registro, candidato, resolucion)
+        if asignada and resolucion.asignable and resolucion.area:
+            try:
+                ventana.cerrar_tras_asignacion()
+            except tk.TclError:
+                pass
+        return asignada
 
         self._ejecutar(tarea, terminar)
 
@@ -1003,16 +1020,44 @@ class VentanaValidacion(tk.Toplevel):
 
     def _abrir_seleccion(self, registro: dict[str, Any]) -> None:
         candidatos = registro.get("candidatos") or []
+        usuario = str(registro.get("usuario") or "")
+        if candidatos:
+            area_maestro = self.maestro.buscar(usuario) or ""
+            candidatos = [
+                {
+                    **dict(candidato),
+                    "AREA_SQL": candidato.get("DEPARTAMENTO") or candidato.get("departamento") or candidato.get("area") or "",
+                    "AREA_MAESTRO": area_maestro,
+                }
+                for candidato in candidatos
+            ]
         if not candidatos:
-            messagebox.showinfo(
-                "Sin coincidencias",
-                "No hay coincidencias registradas. Use 'Consultar SQL' para "
-                "volver a buscar al empleado.",
+            # Cuando SQL no devuelve filas, ofrecer el maestro y la caché
+            # local como fallback manual, sin repetir la búsqueda SQL.
+            from database.coincidencias import ConsolidadorCoincidencias
+
+            grupos = ConsolidadorCoincidencias(maestro=self.maestro).buscar(
+                [usuario], usar_sql=False
             )
-            return
+            grupo = next(iter(grupos.values()), None)
+            candidatos = [
+                {**item, "AREA_MAESTRO": item.get("area") or "", "AREA_SQL": ""}
+                for item in (grupo.candidatos if grupo else [])
+                if str(item.get("origen") or "").upper() == "MAESTRO"
+            ]
+            if not candidatos:
+                if messagebox.askyesno(
+                    "Sin coincidencias SQL ni maestro",
+                    "No se encontró el usuario en SQL ni en el Excel maestro. ¿Desea abrir la consulta manual?",
+                ):
+                    VentanaConsultaSqlManual(
+                        self, usuario=usuario,
+                        al_elegir=lambda candidato: self._elegir_candidato(registro, candidato),
+                    )
+                return
         VentanaCoincidencias(
             self,
-            usuario=str(registro.get("usuario") or ""),
+            usuario=usuario,
             candidatos=candidatos,
             al_elegir=lambda candidato: self._elegir_candidato(registro, candidato),
             al_crear_area=lambda candidato: self._crear_area_desde_coincidencia(
@@ -1921,6 +1966,234 @@ class VentanaSeguimientoConsulta(tk.Toplevel):
             except tk.TclError:  # pragma: no cover
                 pass
             self._after_id = None
+        self.destroy()
+
+
+class VentanaConsultaSqlManual(tk.Toplevel):
+    """Búsqueda guiada manual de empleados y departamentos autorizados."""
+
+    def __init__(
+        self,
+        padre: VentanaValidacion,
+        *,
+        usuario: str,
+        al_elegir: Callable[[dict[str, Any]], None],
+    ) -> None:
+        super().__init__(padre)
+        self.title("Consulta SQL manual de solo lectura")
+        self.geometry("1000x700")
+        self.minsize(760, 520)
+        self.configure(bg=FONDO)
+        self.transient(padre)
+        self._padre = padre
+        self._usuario = usuario
+        self._al_elegir = al_elegir
+        self._filas: list[dict[str, Any]] = []
+        self._tipo_resultado = "empleado"
+        self._var_nombre = tk.StringVar(value=usuario)
+        self._var_codigo_depto = tk.StringVar()
+        self._var_empresa = tk.StringVar(value="ANDINA")
+        self._var_estado = tk.StringVar(value="Ingrese el nombre y elija el origen de búsqueda.")
+
+        ttk.Label(
+            self,
+            text="CONSULTA MANUAL",
+            style="Seccion.TLabel",
+        ).pack(anchor="w", padx=16, pady=(12, 4))
+        self._seccion(self, "Búsqueda de empleados (18 empresas)", "#DCEBFF")
+        fila_nombre = ttk.Frame(self)
+        fila_nombre.pack(fill="x", padx=20, pady=(8, 4))
+        ttk.Label(fila_nombre, text="Nombre del empleado:").pack(side="left", padx=(0, 12))
+        entrada = ttk.Entry(fila_nombre, textvariable=self._var_nombre)
+        entrada.pack(side="left", fill="x", expand=True)
+        entrada.bind("<Return>", lambda _evento: self._buscar_todas())
+        botones_busqueda = ttk.Frame(self)
+        botones_busqueda.pack(fill="x", padx=20, pady=(4, 12))
+        ttk.Button(
+            botones_busqueda, text="Buscar en las 18 empresas",
+            style="Principal.TButton", command=self._buscar_todas,
+        ).pack(side="left", expand=True, fill="x", padx=(0, 6))
+        ttk.Button(
+            botones_busqueda, text="Buscar en SERVIAM",
+            command=self._buscar_serviam,
+        ).pack(side="left", expand=True, fill="x", padx=(6, 0))
+
+        self._seccion(self, "Búsqueda de departamentos", "#E2F3E8")
+        fila_depto = ttk.Frame(self)
+        fila_depto.pack(fill="x", padx=20, pady=(8, 4))
+        ttk.Label(fila_depto, text="Empresa:").pack(side="left", padx=(0, 6))
+        ttk.Combobox(
+            fila_depto, textvariable=self._var_empresa,
+            values=list(EMPRESAS),
+            state="readonly", width=18,
+        ).pack(side="left", padx=(0, 16))
+        ttk.Label(fila_depto, text="Código de departamento:").pack(side="left", padx=(0, 6))
+        ttk.Entry(fila_depto, textvariable=self._var_codigo_depto, width=20).pack(side="left")
+        ttk.Button(
+            fila_depto, text="Buscar departamento", command=self._buscar_departamento,
+        ).pack(side="left", padx=(12, 0))
+        ttk.Label(self, textvariable=self._var_estado, style="Subtitulo.TLabel").pack(
+            anchor="w", padx=20, pady=(0, 6)
+        )
+        contenedor = ttk.Frame(self)
+        contenedor.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        self._tabla = ttk.Treeview(contenedor, show="headings", selectmode="browse")
+        self._tabla.pack(side="left", fill="both", expand=True)
+        scroll = ttk.Scrollbar(contenedor, orient="vertical", command=self._tabla.yview)
+        scroll.pack(side="right", fill="y")
+        self._tabla.configure(yscrollcommand=scroll.set)
+        botones = ttk.Frame(self)
+        botones.pack(fill="x", padx=16, pady=(0, 12))
+        self._btn_usar = ttk.Button(
+            botones, text="ACEPTAR EMPLEADO SELECCIONADO",
+            command=self._seleccionar, state="disabled",
+        )
+        self._btn_usar.pack(side="right")
+        ttk.Button(botones, text="CANCELAR", command=self.destroy).pack(
+            side="right", padx=(0, 8)
+        )
+        self._tabla.bind("<<TreeviewSelect>>", self._actualizar_seleccion)
+
+    @staticmethod
+    def _seccion(padre: tk.Misc, texto: str, color: str) -> None:
+        etiqueta = tk.Label(
+            padre, text=f"  {texto}", anchor="w", bg=color, fg=TEXTO,
+            font=(ui_tema.FUENTE, 11, "bold"), padx=8, pady=8,
+        )
+        etiqueta.pack(fill="x", padx=16, pady=(4, 0))
+
+    def _buscar_todas(self) -> None:
+        nombre = self._var_nombre.get().strip()
+        if not nombre:
+            messagebox.showinfo("Nombre requerido", "Ingrese el nombre del empleado.", parent=self)
+            return
+        self._consultar("empleado", lambda repo: repo.buscar_por_nombres([nombre]))
+
+    def _buscar_serviam(self) -> None:
+        nombre = self._var_nombre.get().strip()
+        if not nombre:
+            messagebox.showinfo("Nombre requerido", "Ingrese el nombre del empleado.", parent=self)
+            return
+        self._consultar("empleado", lambda repo: repo.buscar_serviam_manual(nombre))
+
+    def _buscar_departamento(self) -> None:
+        empresa = self._var_empresa.get().strip().upper()
+        codigo = self._var_codigo_depto.get().strip()
+        if empresa not in EMPRESAS:
+            messagebox.showwarning("Empresa no válida", "Elija una empresa de la lista.", parent=self)
+            return
+        if not codigo:
+            messagebox.showinfo("Código requerido", "Ingrese el código del departamento.", parent=self)
+            return
+        self._consultar(
+            "departamento",
+            lambda repo: repo.buscar_departamento_manual(empresa, codigo),
+        )
+
+    def _consultar(self, tipo: str, consulta: Callable[[Any], Any]) -> None:
+        from config.sqlserver import cargar_configuracion
+        from database.repository import RepositorioEmpleados
+
+        self._tipo_resultado = tipo
+        self._btn_usar.configure(state="disabled")
+        self._var_estado.set("Consultando SQL Server…")
+
+        def tarea():
+            repo = RepositorioEmpleados(cargar_configuracion())
+            return consulta(repo)
+
+        def terminar(resultado):
+            try:
+                if not self.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+            if isinstance(resultado, Exception):
+                self._var_estado.set("La consulta no pudo completarse.")
+                messagebox.showerror("Error de consulta", str(resultado), parent=self)
+                return
+            if tipo == "departamento":
+                filas = [dict(fila) for fila in resultado]
+            else:
+                empleados = getattr(resultado, "empleados", [])
+                filas = [empleado.como_dict() for empleado in empleados]
+            self._mostrar_filas(filas)
+
+        self._padre._ejecutar(tarea, terminar)
+
+    def _mostrar_filas(self, filas: list[dict[str, Any]]) -> None:
+        self._filas = filas
+        self._tabla.delete(*self._tabla.get_children())
+        if self._tipo_resultado == "empleado":
+            columnas = ["NOMBRE", "EMPLEADO", "EMPRESA", "DEPARTAMENTO", "PUESTO", "ACTIVO"]
+            aliases = {
+                "NOMBRE": ("NOMBRE", "nombre"), "EMPLEADO": ("EMPLEADO", "empleado"),
+                "EMPRESA": ("EMPRESA", "empresa"), "DEPARTAMENTO": ("DEPARTAMENTO", "departamento"),
+                "PUESTO": ("PUESTO", "puesto"), "ACTIVO": ("ACTIVO", "activo"),
+            }
+        else:
+            columnas = list(dict.fromkeys(key for fila in filas for key in fila))
+            aliases = {col: (col,) for col in columnas}
+        self._tabla.configure(columns=columnas)
+        for columna in columnas:
+            self._tabla.heading(columna, text=columna.title())
+            self._tabla.column(columna, width=145, anchor="w")
+        for indice, fila in enumerate(filas):
+            valores = []
+            for columna in columnas:
+                valor = next((fila.get(alias) for alias in aliases[columna] if fila.get(alias) not in (None, "")), "")
+                if columna == "EMPRESA" and not valor:
+                    valor = fila.get("FUENTE") or fila.get("fuente") or ""
+                valores.append(str(valor))
+            self._tabla.insert("", "end", iid=str(indice), values=valores)
+        self._btn_usar.configure(state="disabled")
+        self._var_estado.set(f"{len(filas)} resultado(s). Seleccione un registro para continuar.")
+
+    def _actualizar_seleccion(self, _evento=None) -> None:
+        if self._tabla.selection() and self._filas and self._tipo_resultado == "empleado":
+            self._btn_usar.configure(state="normal")
+
+    def _seleccionar(self) -> None:
+        seleccion = self._tabla.selection()
+        if not seleccion:
+            return
+        fila = self._filas[int(seleccion[0])]
+        normalizado = {str(clave).strip().upper(): valor for clave, valor in fila.items()}
+        empleado = normalizado.get("EMPLEADO") or normalizado.get("CODIGO") or ""
+        nombre = normalizado.get("NOMBRE") or normalizado.get("NOMBRE_COMPLETO") or ""
+        empresa = str(normalizado.get("EMPRESA") or normalizado.get("FUENTE") or "").strip().upper()
+        faltantes = [campo for campo, valor in (("NOMBRE", nombre), ("EMPRESA/FUENTE", empresa)) if not valor]
+        if faltantes:
+            messagebox.showwarning(
+                "Columnas insuficientes",
+                "No se puede identificar al empleado. Faltan: " + ", ".join(faltantes),
+                parent=self,
+            )
+            return
+        if empresa not in EMPRESAS:
+            messagebox.showwarning(
+                "Empresa no reconocida",
+                "FUENTE debe identificar una de las 18 empresas autorizadas. No se modificó la asignación.",
+                parent=self,
+            )
+            return
+        candidato = {
+            "EMPLEADO": empleado,
+            "NOMBRE": nombre,
+            "FUENTE": empresa,
+            "EMPRESA": empresa,
+            "DEPARTAMENTO": normalizado.get("DEPARTAMENTO"),
+            "PUESTO": normalizado.get("PUESTO"),
+            "ACTIVO": normalizado.get("ACTIVO"),
+        }
+        if not candidato["DEPARTAMENTO"] and not candidato["PUESTO"]:
+            messagebox.showwarning(
+                "Sin información de área",
+                "El resultado no incluye DEPARTAMENTO ni PUESTO. No se modificó la asignación.",
+                parent=self,
+            )
+            return
+        self._al_elegir(candidato)
         self.destroy()
 
 

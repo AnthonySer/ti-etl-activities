@@ -12,6 +12,7 @@ genera un error de SQL Server: simplemente omite los campos que no existen.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ from database.connection import (
     ErrorConexionSQL,
     conectar,
     ejecutar_consulta,
+    ejecutar_consulta_manual,
 )
 from database.normalizador import claves_empleado, normalizar_nombre
 
@@ -616,6 +618,87 @@ class RepositorioEmpleados:
             return self.config.empresas_activas()
         seleccion = {str(empresa).strip().upper() for empresa in empresas}
         return [empresa for empresa in EMPRESAS if empresa in seleccion]
+
+    def ejecutar_sql_manual(
+        self, sql: str, *, limite_filas: int = 500, timeout_segundos: int = 15
+    ) -> dict[str, Any]:
+        """Ejecuta una consulta manual de lectura con la conexión configurada."""
+
+        huella = hashlib.sha256(sql.encode("utf-8", errors="replace")).hexdigest()[:16]
+        try:
+            with self._fabrica(self.config) as conexion:
+                resultado = ejecutar_consulta_manual(
+                    conexion, sql, limite_filas=limite_filas,
+                    timeout_segundos=timeout_segundos,
+                )
+        except Exception as exc:  # noqa: BLE001 - deja rastro sin almacenar el SQL
+            LOGGER.warning(
+                "SQL manual de solo lectura fallido: huella=%s categoria=%s",
+                huella, getattr(exc, "categoria", type(exc).__name__),
+            )
+            raise
+        LOGGER.info(
+            "SQL manual de solo lectura ejecutado: huella=%s filas=%s truncado=%s",
+            huella, len(resultado.get("filas") or []), resultado.get("truncado"),
+        )
+        return resultado
+
+    def buscar_serviam_manual(self, nombre: str) -> ResultadoConsulta:
+        """Busca directamente en la vista oficial MDA de empleados SERVIAM."""
+
+        plan = busqueda.plan_automatico(nombre)
+        criterio = [(str(nombre or ""), list(plan.terminos))]
+        sql, parametros = queries.sql_empleados_serviam_estructurada(criterio)
+        resultado = ResultadoConsulta(empresas_consultadas=["SERVIAM"])
+        with self._fabrica(self.config) as conexion:
+            filas = self._ejecutor(conexion, sql, parametros)
+        vistos: set[tuple[str, str, str]] = set()
+        for fila in filas:
+            empleado = Empleado.desde_fila("SERVIAM", {
+                **dict(fila), "FUENTE": "SERVIAM", "ESQUEMA": "MDA",
+                "TABLA": "VW_EMPLEADOS_MDA",
+            })
+            huella = empleado.identificador
+            if not empleado.codigo:
+                huella = (
+                    empleado.empresa,
+                    empleado.fuente or empleado.tabla,
+                    "|".join((
+                        normalizar_nombre(empleado.nombre_completo),
+                        normalizar_nombre(empleado.departamento),
+                        normalizar_nombre(empleado.correo),
+                    )),
+                )
+            if huella in vistos:
+                continue
+            vistos.add(huella)
+            resultado.empleados.append(empleado)
+            resultado.por_consulta.setdefault(plan.clave, []).append(empleado)
+        resultado.empresas_sin_datos = [] if resultado.empleados else ["SERVIAM"]
+        return resultado
+
+    def buscar_departamento_manual(
+        self, empresa: str, codigo: str
+    ) -> list[dict[str, Any]]:
+        """Consulta el catálogo del esquema elegido o la vista MDA de SERVIAM."""
+
+        empresa = str(empresa or "").strip().upper()
+        if empresa == "SERVIAM":
+            sql, parametros = queries.sql_departamentos_serviam(codigo)
+        else:
+            capacidades = self._leer_capacidades(empresa)
+            if not capacidades.get("disponible"):
+                raise queries.EsquemaInsuficiente(
+                    f"No se pudieron verificar las columnas de {empresa}."
+                )
+            sql, parametros = queries.sql_departamento_exactus(
+                base_datos=self.config.base_datos,
+                esquema=empresa,
+                codigo=codigo,
+                columnas_disponibles=capacidades["columnas"],
+            )
+        with self._fabrica(self.config) as conexion:
+            return self._ejecutor(conexion, sql, parametros)
 
     def _leer_capacidades(self, empresa: str) -> dict[str, Any]:
         """Columnas reales del esquema, cacheadas por repositorio."""

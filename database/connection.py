@@ -230,6 +230,49 @@ def ejecutar_consulta(
             pass
 
 
+def ejecutar_consulta_manual(
+    conexion: Any,
+    sql: str,
+    *,
+    limite_filas: int = 500,
+    timeout_segundos: int = 15,
+) -> dict[str, Any]:
+    """Ejecuta un SELECT manual validado y devuelve un máximo acotado de filas."""
+
+    from core.consulta_sql_manual import validar_select
+
+    sentencia = validar_select(sql)
+    limite = max(1, min(int(limite_filas), 5000))
+    cursor = conexion.cursor()
+    try:
+        try:
+            cursor.timeout = max(1, min(int(timeout_segundos), 60))
+        except Exception:  # noqa: BLE001 - drivers con timeout de conexión solamente
+            pass
+        cursor.execute(sentencia)
+        if cursor.description is None:
+            raise ErrorConexionSQL("La consulta no devolvió un conjunto de resultados.", "sql")
+        columnas = [str(columna[0]) for columna in cursor.description]
+        filas = cursor.fetchmany(limite + 1)
+        excede = len(filas) > limite
+        filas = filas[:limite]
+        return {
+            "columnas": columnas,
+            "filas": [dict(zip(columnas, fila)) for fila in filas],
+            "truncado": excede,
+            "limite": limite,
+        }
+    except ErrorConexionSQL:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise ErrorConexionSQL(f"No se pudo ejecutar la consulta manual: {exc}", "consulta") from exc
+    finally:
+        try:
+            cursor.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def probar_conexion(config: ConfiguracionSQL) -> dict[str, Any]:
     """Prueba real de conexión. Devuelve estado, mensaje y categoría."""
 
