@@ -15,16 +15,35 @@ from core.modelo_informe_docx import (
     MesInforme,
     RegistroInforme,
 )
+from core.normalizador import normalizar_area
 
 
 _CATEGORIAS = ("Incidencia", "Solicitud", "Proyecto")
 _TICKETS_CANDIDATOS = frozenset({"Incidencia", "Solicitud"})
+_ALIAS_AREAS_INFORME = {
+    "DIRECCION DE OPERACIONES": "DIRECCIÓN DE OPERACIONES",
+    "INVESTIGACION DESARROLLO": "INVESTIGACION Y DESARROLLO",
+    "INVESTIGACION Y DESARROLLO": "INVESTIGACION Y DESARROLLO",
+    "RECURSOS HUMANOS": "RECURSOS HUMANOS",
+    "RR HH": "RECURSOS HUMANOS",
+    "RRHH": "RECURSOS HUMANOS",
+    "TESORERIA Y FINANZAS": "TESORERIA Y FINANZAS",
+}
+
+
+def area_canonica_informe(valor: object) -> str | None:
+    """Unifica espacios, mayúsculas, tildes y alias aprobados para el Anexo 5."""
+
+    clave = normalizar_area(valor)
+    if clave is None:
+        return None
+    return _ALIAS_AREAS_INFORME.get(clave, clave)
 
 
 def _areas(registros: tuple[RegistroInforme, ...]) -> tuple[FilaAreaInforme, ...]:
     cantidades: dict[str | None, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for registro in registros:
-        area = None if _vacio(registro.area_original) else str(registro.area_original)
+        area = area_canonica_informe(registro.area_original)
         categoria = registro.categoria or (
             "Sin clasificar: " + str(registro.actividad_original or "(VACÍO)")
         )
