@@ -45,7 +45,7 @@ def _empresa_de(sql: str, parametros: list[Any], filas: dict[str, list[dict]]) -
     if "INFORMATION_SCHEMA.COLUMNS" in sql:
         return str(parametros[0]) if parametros else ""
     for empresa in filas:
-        if f"[{empresa}]" in sql:
+        if f"EXACTUS].[{empresa}]." in sql:
             return empresa
     return ""
 
@@ -55,6 +55,7 @@ def repositorio(
     filas: dict[str, list[dict[str, Any]]],
     *,
     patrones_vistos: list[list[Any]] | None = None,
+    sentencias_vistas: list[str] | None = None,
 ) -> RepositorioEmpleados:
     @contextmanager
     def conexion():
@@ -64,14 +65,35 @@ def repositorio(
         return conexion()
 
     def ejecutor(_conexion, sql, parametros):
+        if sentencias_vistas is not None:
+            sentencias_vistas.append(sql)
         empresa = _empresa_de(sql, parametros, filas)
-        if "INFORMATION_SCHEMA.COLUMNS" in sql:
+        if "TABLE_SCHEMA AS EMPRESA" in sql:
             return [
-                {"TABLE_NAME": "EMPLEADO", "COLUMN_NAME": columna}
-                for columna in COLUMNAS["EMPLEADO"]
+                {"EMPRESA": nombre, "TABLE_NAME": tabla, "COLUMN_NAME": columna}
+                for nombre in filas
+                for tabla, columnas in COLUMNAS.items()
+                for columna in columnas
             ]
-        if patrones_vistos is not None:
+        if "AS FUENTE FROM [EXACTUS]." in sql and "E.[NOMBRE] LIKE ?" in sql:
+            if patrones_vistos is not None:
+                patrones_vistos.append(list(parametros))
+            return [
+                {
+                    "EMPLEADO": fila["EMPLEADO"],
+                    "NOMBRE": fila["NOMBRE"],
+                    "FUENTE": nombre,
+                }
+                for nombre, datos in filas.items()
+                for fila in datos
+            ]
+        if "VW_EMPLEADOS_MDA" in sql:
+            return list(filas.get("SERVIAM", []))
+        if patrones_vistos is not None and "LIKE ?" in sql:
             patrones_vistos.append(list(parametros))
+        if "E.[EMPLEADO] IN (" in sql:
+            codigos = {str(valor) for valor in parametros}
+            return [fila for fila in filas.get(empresa, []) if str(fila.get("EMPLEADO")) in codigos]
         return list(filas.get(empresa, []))
 
     return RepositorioEmpleados(
@@ -86,6 +108,21 @@ def resolver(empleados) -> ResolverAreas:
 
 
 class PruebasSqlParametrizado(unittest.TestCase):
+    def test_busqueda_principal_es_unica_y_detalles_van_por_codigo(self) -> None:
+        sentencias: list[str] = []
+        repo = repositorio(
+            config(["SERVIAM", "FILASUR"]),
+            {"SERVIAM": [], "FILASUR": []},
+            sentencias_vistas=sentencias,
+        )
+        repo.buscar_por_nombres(["Percy Martinez"])
+        principales = [
+            sql for sql in sentencias
+            if "AS FUENTE FROM [EXACTUS]." in sql and "LIKE ?" in sql
+        ]
+        self.assertEqual(len(principales), 1)
+        self.assertIn("UNION ALL", principales[0])
+
     def test_like_usa_parametros_y_escape(self) -> None:
         sql, cantidad = queries.sql_empleados(
             base_datos="EXACTUS",
@@ -224,7 +261,7 @@ class PruebasProgresoYResultados(unittest.TestCase):
 
         def debe_cancelar() -> bool:
             llamadas["n"] += 1
-            return llamadas["n"] >= 3
+            return True
 
         consulta = repo.buscar_por_consultas(
             [busqueda.plan_busqueda("Percy Martinez").como_dict()],
@@ -232,14 +269,8 @@ class PruebasProgresoYResultados(unittest.TestCase):
             debe_cancelar=debe_cancelar,
         )
         self.assertTrue(consulta.cancelada)
-        self.assertEqual(consulta.empresas_consultadas, ["SERVIAM"])
-        canceladas = {
-            evento["empresa"]
-            for evento in eventos
-            if evento["estado"] == seguimiento.ESTADO_CANCELADA
-        }
-        self.assertEqual(canceladas, {"FILASUR"})
-        self.assertEqual(len(consulta.por_consulta["PERCY MARTINEZ"]), 1)
+        self.assertEqual(consulta.empresas_consultadas, [])
+        self.assertFalse(consulta.por_consulta)
 
 
 class PruebasFlujoConsultaSql(unittest.TestCase):

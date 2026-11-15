@@ -20,7 +20,7 @@ from tkinter import messagebox, ttk
 from typing import Any, Callable, Iterable
 
 from config import configuracion as cfg
-from config.sqlserver import cargar_configuracion
+from config.sqlserver import EMPRESAS, cargar_configuracion
 from core import acciones_revision as acciones
 from core import asignacion_asistida as asistida
 from core import busqueda_solicitantes as busqueda_core
@@ -44,6 +44,7 @@ from database.resolucion import (
     ESTADO_VALIDADO,
     ResolverAreas,
 )
+from database.normalizador import normalizar_nombre
 from database.synchronizer import Sincronizador, cargar_empleados, resumen_sincronizacion
 import ui_tema
 from ui_tema import (
@@ -597,7 +598,7 @@ class VentanaValidacion(tk.Toplevel):
                 busqueda_core.descripcion_orden(plan.get("terminos") or [])
                 for plan in planes
             ],
-            empresas=config.empresas_activas(),
+            empresas=list(EMPRESAS),
         )
         self._ocupado = True
         self._var_resumen.set("Consultando SQL Server por lotes…")
@@ -663,13 +664,37 @@ class VentanaValidacion(tk.Toplevel):
             asignados = 0
             ambiguos: list[dict[str, Any]] = []
             for registro in registros:
-                clave = registro.get("clave") or ""
-                resolucion = resoluciones.get(clave)
+                clave = normalizar_nombre(registro.get("usuario"))
+                resolucion = resoluciones.get(clave) or resoluciones.get(
+                    str(registro.get("clave") or "")
+                )
                 if resolucion is None:
                     continue
                 candidatos = resolucion.candidatos_dict()
                 elegido = resolucion.empleado_dict()
-                if resolucion.asignable and resolucion.caso == CASO_A:
+                if elegido and resolucion.origen_area:
+                    elegido["ORIGEN_AREA"] = resolucion.origen_area
+                # Para una consulta individual, incluso una coincidencia
+                # inequívoca queda pendiente hasta que el usuario confirme
+                # explícitamente el área propuesta en el modal.
+                confirmar_individual = (
+                    len(registros) == 1
+                    and resolucion.asignable
+                    and resolucion.caso == CASO_A
+                )
+                if confirmar_individual:
+                    actualizado = self.revision.actualizar(
+                        registro.get("usuario"),
+                        estado=resolucion.estado,
+                        validado=False,
+                        candidatos=candidatos,
+                        seleccionado=elegido,
+                        motivo=resolucion.motivo,
+                        tipo_resolucion="automatica",
+                        accion="consulta_sql_pendiente_confirmacion",
+                    )
+                    actualizado["area_sugerida"] = resolucion.area
+                elif resolucion.asignable and resolucion.caso == CASO_A:
                     self.revision.actualizar(
                         registro.get("usuario"),
                         area=resolucion.area,

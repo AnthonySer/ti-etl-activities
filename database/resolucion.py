@@ -63,6 +63,7 @@ class ResultadoResolucion:
     empleado: Empleado | None = None
     candidatos: list[Empleado] = field(default_factory=list)
     motivo: str = ""
+    origen_area: str = ""
     conflicto: bool = False
     area_anterior: str = ""
     origen_anterior: str = ""
@@ -93,6 +94,7 @@ class ResultadoResolucion:
             "empleado": self.empleado_dict(),
             "candidatos": self.candidatos_dict(),
             "motivo": self.motivo,
+            "origen_area": self.origen_area,
             "conflicto": self.conflicto,
             "area_anterior": self.area_anterior,
             "origen_anterior": self.origen_anterior,
@@ -226,7 +228,31 @@ class ResolverAreas:
     ) -> ResultadoResolucion:
         """Resuelve un empleado concreto, sin volver a elegir entre candidatos."""
 
-        if not empleado.tiene_departamento:
+        area = limpiar_area(empleado.departamento) or ""
+        if empleado.departamento_codigo:
+            area = area or limpiar_area(empleado.departamento_codigo) or ""
+            departamento_pendiente = bool(
+                not empleado.departamento
+                or normalizar_nombre(empleado.departamento_codigo)
+                == normalizar_nombre(empleado.departamento)
+            )
+            origen_area = (
+                "DEPARTAMENTO_PENDIENTE_VALIDACION"
+                if departamento_pendiente
+                else "DEPARTAMENTO"
+            )
+        elif area:
+            origen_area = "DEPARTAMENTO"
+            departamento_pendiente = False
+        elif limpiar_area(empleado.puesto):
+            area = limpiar_area(empleado.puesto) or ""
+            origen_area = "PUESTO"
+            departamento_pendiente = False
+        else:
+            departamento_pendiente = False
+            origen_area = ""
+
+        if not area:
             return ResultadoResolucion(
                 usuario=texto,
                 clave=clave,
@@ -234,7 +260,7 @@ class ResolverAreas:
                 estado=ESTADO_SIN_DEPARTAMENTO,
                 empleado=empleado,
                 motivo=(
-                    "El empleado no tiene departamento en la base corporativa. "
+                    "El empleado no tiene departamento ni puesto en la base corporativa. "
                     "No se inventará un área."
                 ),
             )
@@ -246,7 +272,8 @@ class ResolverAreas:
                 caso=CASO_E,
                 estado=ESTADO_INACTIVO,
                 empleado=empleado,
-                area=empleado.departamento,
+                area=area,
+                origen_area=origen_area,
                 motivo=(
                     "El empleado figura como inactivo"
                     + (f" ({empleado.estado_empleado})" if empleado.estado_empleado else "")
@@ -259,11 +286,20 @@ class ResolverAreas:
             clave=clave,
             caso=CASO_A,
             estado=ESTADO_VALIDADO,
-            area=empleado.departamento,
+            area=area,
+            origen_area=origen_area,
             empleado=empleado,
-            motivo="Coincidencia única con departamento corporativo.",
+            motivo=(
+                "Departamento encontrado, su descripción está pendiente de validación."
+                if departamento_pendiente
+                else (
+                    "Coincidencia única; se utilizó el puesto porque el empleado no tiene departamento."
+                    if origen_area == "PUESTO"
+                    else "Coincidencia única con departamento corporativo."
+                )
+            ),
         )
-        self._conflicto(resultado, empleado.departamento, texto)
+        self._conflicto(resultado, area, texto)
         return resultado
 
     def resolver(self, usuario: Any) -> ResultadoResolucion:
