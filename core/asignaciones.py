@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -308,6 +309,7 @@ def asignar(
     operaciones. Los reintentos de la misma asignación no se duplican.
     """
 
+    inicio = time.perf_counter()
     normalizadas: list[dict[str, str]] = []
     detalle: list[Asignacion] = []
 
@@ -443,6 +445,10 @@ def asignar(
             datos={"registros": len(detalle)},
         )
 
+    LOGGER.info(
+        "Rendimiento asignacion_lote: duración=%.3fs registros=%s persistencias_maestro=%s",
+        time.perf_counter() - inicio, len(detalle), int(bool(guardar)),
+    )
     return ResultadoAsignaciones(
         asignaciones=detalle,
         resultado=resultado,

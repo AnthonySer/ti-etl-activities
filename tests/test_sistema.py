@@ -1476,6 +1476,10 @@ class PruebasInterfaz(BaseTemporal):
         app._preview_df = pd.DataFrame({"anterior": [1]})
         app._preview_info = {"hoja": "Hoja anterior"}
         app._ruta_preview = str((self.raiz / "anterior.xlsx").resolve())
+        app._ocupado = False
+        app._iniciar_ocupado = mock.MagicMock()
+        app._terminar_ocupado = mock.MagicMock()
+        app._ejecutar_hilo = lambda tarea, callback, _descripcion: callback(tarea())
 
         with (
             mock.patch("interfaz.filedialog.askopenfilename", return_value=""),
