@@ -65,6 +65,68 @@ def _ruta(valor: Path | str | None = None) -> Path:
     return Path(valor or cfg.ESTADO_UI_JSON)
 
 
+def resolver_archivo_persistido(
+    valor: Path | str | None,
+    *,
+    carpetas: tuple[Path | str, ...] | None = None,
+) -> str:
+    """Devuelve una ruta utilizable para un archivo guardado en el estado.
+
+    El estado puede haberse copiado desde otro equipo y conservar rutas que ya
+    no existen. En ese caso se busca un archivo con el mismo nombre en las
+    carpetas de trabajo del proyecto. Devuelve ``""`` si no se localiza.
+    """
+
+    if valor is None or not str(valor).strip():
+        return ""
+
+    ruta = Path(valor)
+    if not ruta.is_absolute():
+        ruta = cfg.BASE_DIR / ruta
+    if ruta.exists():
+        return str(ruta)
+
+    if carpetas is None:
+        carpetas = (
+            cfg.OUTPUT_DIR,
+            cfg.REVISION_DIR,
+            cfg.REPORTES_DIR,
+            cfg.DATA_DIR,
+            cfg.INPUT_DIR,
+            cfg.BASE_DIR,
+        )
+    for carpeta in (Path(c) for c in carpetas):
+        candidato = carpeta / ruta.name
+        if candidato.exists():
+            LOGGER.warning(
+                "La ruta guardada '%s' no existe; se usa '%s' por coincidencia de nombre.",
+                ruta,
+                candidato,
+            )
+            return str(candidato)
+
+    LOGGER.warning(
+        "La ruta guardada '%s' ya no existe y no se encontró una copia equivalente.",
+        ruta,
+    )
+    return ""
+
+
+def _ruta_persistible(valor: Path | str | None) -> str:
+    """Guarda rutas internas como relativas para que el estado sea portable."""
+
+    if valor is None or not str(valor).strip():
+        return ""
+
+    ruta = Path(valor)
+    if not ruta.is_absolute():
+        return ruta.as_posix()
+    try:
+        return ruta.resolve().relative_to(cfg.BASE_DIR.resolve()).as_posix()
+    except (OSError, ValueError):
+        return str(ruta)
+
+
 def cargar_estado(ruta: Path | str | None = None) -> EstadoUI:
     """Carga el estado; si no existe o está dañado, devuelve uno vacío."""
 
@@ -129,13 +191,13 @@ def actualizar_desde_estadisticas(
 
     estado = cargar_estado(ruta)
     estado.ultima_operacion = operacion
-    estado.ultimo_archivo_entrada = str(
+    estado.ultimo_archivo_entrada = _ruta_persistible(
         getattr(estadisticas, "archivo_entrada", "") or ""
     )
-    estado.ultimo_archivo_procesado = str(
+    estado.ultimo_archivo_procesado = _ruta_persistible(
         getattr(estadisticas, "archivo_salida", "") or ""
     )
-    estado.ultimo_manifiesto = str(
+    estado.ultimo_manifiesto = _ruta_persistible(
         getattr(estadisticas, "archivo_manifiesto", "") or ""
     )
     estado.ultima_hoja = str(getattr(estadisticas, "hoja", "") or "")
@@ -188,7 +250,7 @@ def registrar_consolidacion(
 
 def registrar_reporte(ruta_reporte: Path | str, *, ruta: Path | str | None = None) -> EstadoUI:
     estado = cargar_estado(ruta)
-    estado.ultimo_reporte = str(ruta_reporte)
+    estado.ultimo_reporte = _ruta_persistible(ruta_reporte)
     estado.ultima_operacion = "REPORTE"
     guardar_estado(estado, ruta)
     return estado

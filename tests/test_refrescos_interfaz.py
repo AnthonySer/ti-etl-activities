@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import threading
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+from core import asignaciones as svc_asignaciones
+from core import estado as svc_estado
 from core import eventos
 from interfaz import AplicacionTk
 from ventana_validacion import VentanaValidacion
@@ -116,6 +120,61 @@ class PruebasRefrescoValidacion(unittest.TestCase):
         ]
         filtrados = VentanaValidacion._filtrar_registros(registros, "ana", "Validado")
         self.assertEqual(filtrados, [registros[1]])
+
+
+class PruebasRutasPersistidas(unittest.TestCase):
+    def test_ruta_inexistente_se_resuelve_por_nombre_en_carpetas_conocidas(self) -> None:
+        with tempfile.TemporaryDirectory() as carpeta:
+            esperado = Path(carpeta) / "consulta_x.manifest.json"
+            esperado.write_text("{}", encoding="utf-8")
+
+            resuelta = svc_estado.resolver_archivo_persistido(
+                r"C:\otro\equipo\consulta_x.manifest.json",
+                carpetas=(Path(carpeta),),
+            )
+
+            self.assertEqual(Path(resuelta), esperado)
+
+    def test_ruta_inexistente_sin_copia_devuelve_vacio(self) -> None:
+        with tempfile.TemporaryDirectory() as carpeta:
+            resuelta = svc_estado.resolver_archivo_persistido(
+                r"C:\otro\equipo\no_existe.manifest.json",
+                carpetas=(Path(carpeta),),
+            )
+            self.assertEqual(resuelta, "")
+
+    def test_usuarios_pendientes_sin_manifiesto_devuelve_lista_vacia(self) -> None:
+        from core.maestro import Maestro
+
+        self.assertEqual(svc_asignaciones.usuarios_pendientes("", Maestro()), [])
+        self.assertEqual(svc_asignaciones.usuarios_pendientes(None, Maestro()), [])
+
+    def test_estado_guarda_rutas_internas_como_relativas(self) -> None:
+        from config import configuracion as cfg
+
+        with tempfile.TemporaryDirectory() as carpeta:
+            ruta_estado = Path(carpeta) / "estado.json"
+            salida = cfg.BASE_DIR / "output" / "procesado.xlsx"
+            manifiesto = cfg.BASE_DIR / "output" / "procesado.manifest.json"
+            estadisticas = SimpleNamespace(
+                archivo_entrada="entrada.xlsx",
+                archivo_salida=str(salida),
+                archivo_manifiesto=str(manifiesto),
+                hoja="Consulta",
+                periodo="2026-01",
+                id_ejecucion="EJEC-1",
+            )
+
+            estado = svc_estado.actualizar_desde_estadisticas(
+                estadisticas, ruta=ruta_estado
+            )
+
+            self.assertEqual(
+                estado.ultimo_archivo_procesado, "output/procesado.xlsx"
+            )
+            self.assertEqual(
+                estado.ultimo_manifiesto, "output/procesado.manifest.json"
+            )
 
 
 class PruebasCoordinadorInterfaz(unittest.TestCase):
