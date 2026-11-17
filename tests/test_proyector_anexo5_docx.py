@@ -192,8 +192,8 @@ class TestProyectorAnexo5Docx(unittest.TestCase):
             self.assertEqual(len(tablas["areas"].rows), 23)
             self.assertEqual(len(tablas["detalle"].rows), 180)
             resumen_horas = {fila.cells[0].text: fila.cells[1].text for fila in tablas["resumen_tipo_atencion"].rows[1:]}
-            self.assertEqual(resumen_horas["Incidencia"], "148.5")
-            self.assertEqual(resumen_horas["Proyecto"], "83.5")
+            self.assertEqual(resumen_horas["Incidencia"], "148.50")
+            self.assertEqual(resumen_horas["Proyecto"], "83.50")
             self.assertEqual(resumen_horas["Solicitud"], "194.75")
             self.assertEqual(resumen_horas["TOTAL"], "426.75")
             tickets = {fila.cells[0].text: fila.cells[1].text for fila in tablas["tickets_tipo"].rows[1:]}

@@ -9,13 +9,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
 
 CategoriaInforme = str
 MesInforme = tuple[int, int]
+CENTIMOS_HORA = Decimal("0.01")
+
+
+def normalizar_horas(valor: Decimal) -> Decimal:
+    """Redondea horas a dos decimales con la política ROUND_HALF_UP."""
+
+    return valor.quantize(CENTIMOS_HORA, rounding=ROUND_HALF_UP)
+
+
+def formatear_horas(valor: Decimal | int | float | None) -> str:
+    """Presenta horas con exactamente dos decimales; vacío si no hay valor."""
+
+    if valor is None:
+        return ""
+    numero = valor if isinstance(valor, Decimal) else Decimal(str(valor))
+    return format(normalizar_horas(numero), ".2f")
 
 
 @dataclass(frozen=True)

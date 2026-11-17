@@ -53,6 +53,7 @@ from core.consolidacion_tickets import consolidar_procesado
 from core.esquema import COLUMNAS_OFICIALES, C_FECHA, C_HORAS, C_SOLICITANTE
 from core.etl import previsualizar
 from core.maestro_tickets import MaestroTickets
+from core.modelo_informe_docx import formatear_horas
 from core.procesado import resolver_salida
 from core.procesador import procesar_archivo
 from core.reimportacion import (
@@ -3922,11 +3923,11 @@ class AplicacionTk(tk.Tk):
             f"Solicitudes: {categorias.get('Solicitud').cantidad_registros if categorias.get('Solicitud') else 0}",
             f"Actividades de proyecto: {estadisticas.actividades_proyecto}",
             f"Proyectos distintos por nombre exacto: {len(estadisticas.nombres_proyecto_distintos_exactos)}",
-            f"Horas conocidas: {sum((h for _, h in estadisticas.horas_conocidas_por_categoria), start=0)}{' (PARCIAL)' if any(f.filas_sin_horas or f.filas_con_horas_invalidas for f in estadisticas.filas_por_categoria) else ''}",
+            f"Horas conocidas: {formatear_horas(sum((h for _, h in estadisticas.horas_conocidas_por_categoria), start=0))}{' (PARCIAL)' if any(f.filas_sin_horas or f.filas_con_horas_invalidas for f in estadisticas.filas_por_categoria) else ''}",
         ]
         lineas.extend(["", "CATEGORÍAS Y HORAS"])
         lineas.extend(
-            f"- {fila.categoria}: {fila.cantidad_registros} filas; {fila.horas_conocidas} horas conocidas"
+            f"- {fila.categoria}: {fila.cantidad_registros} filas; {formatear_horas(fila.horas_conocidas)} horas conocidas"
             for fila in estadisticas.filas_por_categoria
         )
         lineas.extend(["", "ÁREAS (EXCLUYE PROYECTOS)"])
