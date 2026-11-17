@@ -32,6 +32,7 @@ from core.modelo_informe_docx import (
     HallazgoInforme,
     PeriodoDetectado,
     RegistroInforme,
+    normalizar_horas,
 )
 from core.procesado import _categoria_actividad
 
@@ -150,6 +151,12 @@ def _horas(valor: Any) -> tuple[Decimal | None, str]:
     except (InvalidOperation, ValueError, TypeError):
         return None, "invalido"
     if not numero.is_finite() or numero < 0:
+        return None, "invalido"
+    try:
+        # El valor original de la celda se conserva en ``horas_original``; el
+        # derivado que alimenta todos los cálculos queda a dos decimales.
+        numero = normalizar_horas(numero)
+    except InvalidOperation:
         return None, "invalido"
     return numero, "valido"
 

@@ -13,7 +13,12 @@ from typing import Mapping, Sequence
 from core.actualizador_graficos_docx import SerieGraficoDocx
 from core.estadisticas_informe_docx import area_canonica_informe
 from core.lector_informe_docx import _vacio
-from core.modelo_informe_docx import DatosInforme, EstadisticasInforme, RegistroInforme
+from core.modelo_informe_docx import (
+    DatosInforme,
+    EstadisticasInforme,
+    RegistroInforme,
+    formatear_horas,
+)
 
 
 _MESES = (
@@ -38,11 +43,9 @@ class ErrorProyeccionAnexo5(ValueError):
 
 
 def _numero(valor: Decimal | int | float | None) -> str:
-    if valor is None:
-        return ""
-    numero = valor if isinstance(valor, Decimal) else Decimal(str(valor))
-    texto = format(numero, "f")
-    return texto.rstrip("0").rstrip(".") if "." in texto else texto
+    """Presenta horas con exactamente dos decimales (ROUND_HALF_UP)."""
+
+    return formatear_horas(valor)
 
 
 def _porcentaje(valor: Decimal | int | float, total: Decimal) -> str:

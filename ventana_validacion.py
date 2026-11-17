@@ -25,6 +25,7 @@ from core import acciones_revision as acciones
 from core import asignacion_asistida as asistida
 from core import busqueda_solicitantes as busqueda_core
 from core import catalogo_areas
+from core import coincidencias_vista
 from core import eventos
 from core import procedencia
 from core import revision as svc_revision
@@ -71,6 +72,62 @@ AZUL_SUAVE = "#EAF2FF"
 
 def _texto(valor: Any) -> str:
     return "" if valor is None else str(valor)
+
+
+def _huella_candidato(candidato: dict[str, Any]) -> tuple[str, ...]:
+    """Identidad estable para combinar candidatos de la revisión y de SQL."""
+
+    empresa, fuente, empleado = sel.identidad(candidato)
+    nombre = normalizar_nombre(
+        candidato.get("nombre") or candidato.get("NOMBRE") or ""
+    )
+    area = normalizar_nombre(
+        candidato.get("departamento")
+        or candidato.get("DEPARTAMENTO")
+        or candidato.get("area")
+        or candidato.get("AREA")
+        or ""
+    )
+    return (
+        str(candidato.get("origen") or candidato.get("ORIGEN") or ""),
+        empresa,
+        fuente,
+        empleado,
+        nombre,
+        area,
+    )
+
+
+def _combinar_candidatos(
+    previos: Iterable[dict[str, Any]] | None,
+    nuevos: Iterable[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Une candidatos previos y nuevos sin perder los ya disponibles.
+
+    Los resultados nuevos tienen prioridad, pero un duplicado solo completa los
+    campos que el candidato nuevo no traía. Si la lista nueva está vacía, se
+    conserva íntegra la anterior. La consolidación para mostrar se hace después
+    con ``coincidencias_vista.consolidar``.
+    """
+
+    salida: list[dict[str, Any]] = []
+    posiciones: dict[tuple[str, ...], int] = {}
+    for grupo in (nuevos, previos):
+        for candidato in grupo or []:
+            if not isinstance(candidato, dict):
+                continue
+            datos = dict(candidato)
+            huella = _huella_candidato(datos)
+            posicion = posiciones.get(huella)
+            if posicion is None:
+                posiciones[huella] = len(salida)
+                salida.append(datos)
+                continue
+            base = salida[posicion]
+            for clave, valor in datos.items():
+                if clave not in base or base.get(clave) in (None, ""):
+                    base[clave] = valor
+    return salida
 
 
 def filtrar_areas(
@@ -1072,10 +1129,18 @@ class VentanaValidacion(tk.Toplevel):
                 )
                 if resolucion is None:
                     continue
-                candidatos = resolucion.candidatos_dict()
                 elegido = resolucion.empleado_dict()
                 if elegido and resolucion.origen_area:
                     elegido["ORIGEN_AREA"] = resolucion.origen_area
+                # Nunca se descartan candidatos válidos ya guardados. Si la
+                # consulta no devuelve filas, se conserva lo que existía; si
+                # devuelve una única coincidencia, también queda como candidato.
+                nuevos = resolucion.candidatos_dict()
+                if elegido:
+                    nuevos = [dict(elegido)] + nuevos
+                candidatos = _combinar_candidatos(
+                    registro.get("candidatos"), nuevos
+                )
                 # Para una consulta individual, incluso una coincidencia
                 # inequívoca queda pendiente hasta que el usuario confirme
                 # explícitamente el área propuesta en el modal.
@@ -1466,32 +1531,37 @@ class VentanaValidacion(tk.Toplevel):
         self._abrir_seleccion(registro)
 
     def _abrir_seleccion(self, registro: dict[str, Any]) -> None:
-        candidatos = registro.get("candidatos") or []
         usuario = str(registro.get("usuario") or "")
+        # El registro de la tabla puede ser una copia anterior a la última
+        # consulta SQL. Se prefiere el registro vivo de la revisión, pero sin
+        # descartar candidatos válidos que solo estén en la copia recibida.
+        vigente = self.revision.buscar(usuario) or registro
+        area_maestro = self.maestro.buscar(usuario) or ""
+        candidatos = _combinar_candidatos(
+            registro.get("candidatos"), vigente.get("candidatos")
+        )
         if candidatos:
-            area_maestro = self.maestro.buscar(usuario) or ""
-            candidatos = [
-                {
-                    **dict(candidato),
-                    "AREA_SQL": candidato.get("DEPARTAMENTO") or candidato.get("departamento") or candidato.get("area") or "",
-                    "AREA_MAESTRO": area_maestro,
-                }
-                for candidato in candidatos
-            ]
+            candidatos = coincidencias_vista.consolidar(
+                candidatos, area_maestro=area_maestro
+            )
         if not candidatos:
-            # Cuando SQL no devuelve filas, ofrecer el maestro y la caché
-            # local como fallback manual, sin repetir la búsqueda SQL.
+            # Cuando SQL no devuelve filas, ofrecer el maestro como fallback
+            # manual. Se usa ``usar_sql=False``: esta ruta nunca repite la
+            # consulta SQL ni descarta resultados ya obtenidos.
             from database.coincidencias import ConsolidadorCoincidencias
 
             grupos = ConsolidadorCoincidencias(maestro=self.maestro).buscar(
                 [usuario], usar_sql=False
             )
             grupo = next(iter(grupos.values()), None)
-            candidatos = [
-                {**item, "AREA_MAESTRO": item.get("area") or "", "AREA_SQL": ""}
+            maestro = [
+                item
                 for item in (grupo.candidatos if grupo else [])
                 if str(item.get("origen") or "").upper() == "MAESTRO"
             ]
+            candidatos = coincidencias_vista.consolidar(
+                maestro, area_maestro=area_maestro
+            )
             if not candidatos:
                 if messagebox.askyesno(
                     "Sin coincidencias SQL ni maestro",
@@ -1499,19 +1569,19 @@ class VentanaValidacion(tk.Toplevel):
                 ):
                     VentanaConsultaSqlManual(
                         self, usuario=usuario,
-                        al_elegir=lambda candidato: self._elegir_candidato(registro, candidato),
+                        al_elegir=lambda candidato: self._elegir_candidato(vigente, candidato),
                     )
                 return
         VentanaCoincidencias(
             self,
             usuario=usuario,
             candidatos=candidatos,
-            al_elegir=lambda candidato: self._elegir_candidato(registro, candidato),
+            al_elegir=lambda candidato: self._elegir_candidato(vigente, candidato),
             al_asignar_inactivo=lambda candidato: self._elegir_candidato(
-                registro, candidato, permitir_inactivo=True
+                vigente, candidato, permitir_inactivo=True
             ),
             al_crear_area=lambda candidato: self._crear_area_desde_coincidencia(
-                registro, candidato
+                vigente, candidato
             ),
         )
 
@@ -3364,13 +3434,15 @@ class VentanaCoincidencias(tk.Toplevel):
         ("nombre", "NOMBRE", 200),
         ("tipo", "COINCIDENCIA", 120),
         ("similitud", "SIMILITUD", 95),
+        ("cruce", "CRUCE EXCEL/SQL", 185),
         ("empresa", "EMPRESA", 105),
         ("fuente", "FUENTE", 110),
+        ("tabla", "TABLA", 110),
         ("departamento", "DEPARTAMENTO", 180),
         ("area_sql", "ÁREA SQL", 150),
         ("area_maestro", "ÁREA MAESTRO", 150),
         ("puesto", "PUESTO", 170),
-        ("activo", "ACTIVO", 95),
+        ("activo", "ESTADO", 110),
         ("correo", "CORREO", 200),
     )
 
@@ -3380,10 +3452,10 @@ class VentanaCoincidencias(tk.Toplevel):
         *,
         usuario: str,
         candidatos: Iterable[dict[str, Any]],
-        al_elegir: Callable[[dict[str, Any]], None],
+        al_elegir: Callable[[dict[str, Any]], bool | None],
         al_cancelar: Callable[[], None] | None = None,
         al_crear_area: Callable[[dict[str, Any]], None] | None = None,
-        al_asignar_inactivo: Callable[[dict[str, Any]], None] | None = None,
+        al_asignar_inactivo: Callable[[dict[str, Any]], bool | None] | None = None,
     ) -> None:
         super().__init__(padre)
         self.title("Seleccionar empleado / empresa correcta")
@@ -3392,13 +3464,15 @@ class VentanaCoincidencias(tk.Toplevel):
         self.configure(bg=FONDO)
         self.transient(padre)
         self.grab_set()
-        self._candidatos = list(candidatos)
+        self._candidatos = coincidencias_vista.consolidar(candidatos)
         self._al_elegir = al_elegir
         self._al_cancelar = al_cancelar
         self._al_crear_area = al_crear_area
         self._al_asignar_inactivo = al_asignar_inactivo
         self._iids: dict[str, dict[str, Any]] = {}
         self._orden = ("empleado", False)
+        self._pestana = coincidencias_vista.PESTANA_TODOS
+        self._botones_pestana: dict[str, ttk.Button] = {}
 
         self._var_empleado = tk.StringVar()
         self._var_nombre = tk.StringVar()
@@ -3406,6 +3480,7 @@ class VentanaCoincidencias(tk.Toplevel):
         self._var_fuente = tk.StringVar(value="Todas")
         self._var_departamento = tk.StringVar(value="Todos")
         self._var_conteo = tk.StringVar(value="")
+        self._var_reporte = tk.StringVar(value="")
 
         ttk.Label(
             self,
@@ -3420,12 +3495,57 @@ class VentanaCoincidencias(tk.Toplevel):
             ),
             style="Subtitulo.TLabel",
         ).pack(anchor="w", padx=18)
+        ttk.Label(
+            self,
+            textvariable=self._var_reporte,
+            style="Subtitulo.TLabel",
+            wraplength=1120,
+            justify="left",
+        ).pack(anchor="w", padx=18, pady=(4, 0))
 
+        self._construir_pestanas()
         self._construir_filtros()
         self._construir_tabla()
         self._construir_botones()
         self._refrescar()
         self.protocol("WM_DELETE_WINDOW", self._cancelar)
+
+    # ------------------------------------------------------------------
+    def _construir_pestanas(self) -> None:
+        """Pestañas visibles sin ``ttk.Notebook`` (el tema oculta sus solapas)."""
+
+        marco = ttk.Frame(self)
+        marco.pack(fill="x", padx=18, pady=(8, 0))
+        for nombre in coincidencias_vista.PESTANAS:
+            boton = ttk.Button(
+                marco,
+                text=nombre,
+                command=lambda valor=nombre: self._cambiar_pestana(valor),
+            )
+            boton.pack(side="left", padx=(0, 6))
+            self._botones_pestana[nombre] = boton
+
+    def _cambiar_pestana(self, nombre: str) -> None:
+        if nombre == self._pestana:
+            return
+        self._pestana = nombre
+        self._refrescar()
+
+    def _actualizar_pestanas(self, resumen: dict[str, int]) -> None:
+        conteos = {
+            coincidencias_vista.PESTANA_TODOS: resumen.get("total", 0),
+            coincidencias_vista.PESTANA_EXCEL: resumen.get("excel", 0),
+            coincidencias_vista.PESTANA_SQL: resumen.get("sql", 0),
+        }
+        for nombre, boton in self._botones_pestana.items():
+            boton.configure(
+                text=f"{nombre} ({conteos.get(nombre, 0)})",
+                style=(
+                    "Principal.TButton"
+                    if nombre == self._pestana
+                    else "TButton"
+                ),
+            )
 
     # ------------------------------------------------------------------
     def _construir_filtros(self) -> None:
@@ -3498,11 +3618,10 @@ class VentanaCoincidencias(tk.Toplevel):
             marco, columns=columnas, show="headings", selectmode="browse"
         )
         for columna, titulo, ancho in self._COLUMNAS:
-            self._tabla.heading(
-                columna,
-                text=titulo,
-                command=lambda c=columna: self._ordenar(c),
-            )
+            opciones_heading: dict[str, Any] = {"text": titulo}
+            if columna not in ("tabla", "cruce"):
+                opciones_heading["command"] = lambda c=columna: self._ordenar(c)
+            self._tabla.heading(columna, **opciones_heading)
             self._tabla.column(columna, width=ancho, anchor="w", stretch=False)
         barra_y = ttk.Scrollbar(marco, orient="vertical", command=self._tabla.yview)
         barra_x = ttk.Scrollbar(marco, orient="horizontal", command=self._tabla.xview)
@@ -3565,7 +3684,19 @@ class VentanaCoincidencias(tk.Toplevel):
         }
 
     def _refrescar(self) -> None:
-        filtrados = sel.filtrar_candidatos(self._candidatos, **self._filtros())
+        resumen = coincidencias_vista.resumen(self._candidatos)
+        self._actualizar_pestanas(resumen)
+        self._var_reporte.set(
+            f"Total {resumen['total']} · Excel {resumen['excel']} · "
+            f"SQL {resumen['sql']} · Activos {resumen['activos']} · "
+            f"Inactivos {resumen['inactivos']} · "
+            f"No disponibles {resumen['no_disponibles']} · "
+            f"Cruces: {resumen['filas_cruce_confirmado']} confirmadas / "
+            f"{resumen['filas_cruce_posible']} posibles"
+        )
+
+        base = coincidencias_vista.filtrar(self._candidatos, self._pestana)
+        filtrados = sel.filtrar_candidatos(base, **self._filtros())
         columna, descendente = self._orden
         if columna in ("tipo", "similitud"):
             filtrados = sorted(
@@ -3584,12 +3715,12 @@ class VentanaCoincidencias(tk.Toplevel):
         for indice, candidato in enumerate(filtrados):
             iid = f"c{indice}"
             self._iids[iid] = candidato
-            etiqueta = sel.valor(candidato, "activo")
+            estado = coincidencias_vista.estado_candidato(candidato)
             tag = (
                 "activo"
-                if etiqueta == "Activo"
+                if estado == coincidencias_vista.ESTADO_ACTIVO
                 else "inactivo"
-                if etiqueta == "Inactivo"
+                if estado == coincidencias_vista.ESTADO_INACTIVO
                 else "desconocido"
             )
             self._tabla.insert(
@@ -3603,7 +3734,7 @@ class VentanaCoincidencias(tk.Toplevel):
                 tags=(tag,),
             )
         self._var_conteo.set(
-            f"{len(filtrados)} de {len(self._candidatos)} coincidencias"
+            f"Mostrando {len(filtrados)} de {len(base)} en «{self._pestana}»"
         )
         self._actualizar_boton()
 
@@ -3630,6 +3761,12 @@ class VentanaCoincidencias(tk.Toplevel):
             return str(candidato.get("AREA_SQL") or "—")
         if columna == "area_maestro":
             return str(candidato.get("AREA_MAESTRO") or "—")
+        if columna == "tabla":
+            return str(candidato.get("tabla_origen") or "—")
+        if columna == "cruce":
+            return coincidencias_vista.texto_cruce(candidato) or "—"
+        if columna == "activo":
+            return coincidencias_vista.estado_candidato(candidato)
         if columna == "tipo":
             tipo = str(candidato.get("tipo") or "").strip().lower()
             return {
@@ -3659,7 +3796,11 @@ class VentanaCoincidencias(tk.Toplevel):
                 self._iids.get(self._tabla.selection()[0])
                 if hay_seleccion else None
             )
-            inactivo = candidato is not None and sel.valor(candidato, "activo") == "Inactivo"
+            # Solo INACTIVO inequívoco habilita la acción excepcional.
+            # NO DISPONIBLE nunca se interpreta como inactivo.
+            inactivo = candidato is not None and coincidencias_vista.es_inactivo(
+                candidato
+            )
             self._btn_asignar_inactivo.configure(
                 state="normal" if inactivo else "disabled"
             )
@@ -3687,7 +3828,12 @@ class VentanaCoincidencias(tk.Toplevel):
         candidato = self._iids.get(seleccion[0])
         if candidato is None:
             return
-        self._al_elegir(dict(candidato))
+        # La ventana solo se cierra si la asignación se completó. Si el usuario
+        # cancela la confirmación, hay conflicto o falla el guardado, se
+        # conserva la ventana y la selección para reintentar.
+        resultado = self._al_elegir(dict(candidato))
+        if resultado is False:
+            return
         self.destroy()
 
     def _crear_area(self) -> None:
@@ -3708,9 +3854,13 @@ class VentanaCoincidencias(tk.Toplevel):
         if not seleccion or self._al_asignar_inactivo is None:
             return
         candidato = self._iids.get(seleccion[0])
-        if candidato is None or sel.valor(candidato, "activo") != "Inactivo":
+        # Solo se permite con INACTIVO inequívoco; NO DISPONIBLE no habilita
+        # esta acción excepcional.
+        if candidato is None or not coincidencias_vista.es_inactivo(candidato):
             return
-        self._al_asignar_inactivo(dict(candidato))
+        resultado = self._al_asignar_inactivo(dict(candidato))
+        if resultado is False:
+            return
         self.destroy()
 
     def _cancelar(self) -> None:
