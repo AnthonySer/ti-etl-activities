@@ -19,6 +19,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from config import configuracion as cfg
 from core.archivos import ErrorArchivo
+from core.normalizador import normalizar_area
 from core.esquema import (
     C_ACTIVIDAD,
     C_AREA,
@@ -738,7 +739,24 @@ def _tabla_area(df: pd.DataFrame) -> pd.DataFrame:
     areas = df[[C_AREA]].copy()
     valores_area = areas[C_AREA].fillna("").astype(str).str.strip()
     sin_area = valores_area.str.casefold().isin({"", "nan", "none", "null", "n/a"})
-    areas[C_AREA] = valores_area.mask(sin_area, "Sin área")
+
+    conteo_variantes: dict[str, dict[str, int]] = {}
+    for valor in valores_area[~sin_area]:
+        norm = normalizar_area(valor) or valor.upper()
+        conteo = conteo_variantes.setdefault(norm, {})
+        conteo[valor] = conteo.get(valor, 0) + 1
+
+    mapa_canonico: dict[str, str] = {}
+    for norm, variantes in conteo_variantes.items():
+        mejor = max(variantes.keys(), key=lambda v: (variantes[v], v.isupper(), len(v)))
+        mapa_canonico[norm] = mejor
+
+    areas_unificadas = valores_area.map(
+        lambda v: mapa_canonico.get(normalizar_area(v) or v.upper(), v)
+        if v.casefold() not in {"", "nan", "none", "null", "n/a"}
+        else "Sin área"
+    )
+    areas[C_AREA] = areas_unificadas
     if areas.empty:
         filas = []
         total = 0

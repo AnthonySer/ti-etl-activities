@@ -73,8 +73,10 @@ def _texto(valor: Any) -> str:
     return "" if valor is None else str(valor)
 
 
-def filtrar_areas(areas: Iterable[str], texto: str = "") -> list[str]:
-    """Deduplica y filtra áreas del maestro con coincidencia parcial."""
+def filtrar_areas(
+    areas: Iterable[str], texto: str = "", *, contiene: bool = False
+) -> list[str]:
+    """Deduplica y filtra áreas del maestro con coincidencia parcial o por subcadena."""
 
     unicas: dict[str, str] = {}
     for area in areas:
@@ -82,11 +84,25 @@ def filtrar_areas(areas: Iterable[str], texto: str = "") -> list[str]:
         if nombre:
             unicas.setdefault(nombre.casefold(), nombre)
     consulta = str(texto or "").strip().casefold()
+    if not consulta:
+        return sorted(unicas.values(), key=str.casefold)
+
+    if contiene:
+        empiezan = [
+            nombre for clave, nombre in unicas.items() if clave.startswith(consulta)
+        ]
+        resto = [
+            nombre
+            for clave, nombre in unicas.items()
+            if consulta in clave and not clave.startswith(consulta)
+        ]
+        return sorted(empiezan, key=str.casefold) + sorted(resto, key=str.casefold)
+
     return sorted(
         (
             nombre
             for clave, nombre in unicas.items()
-            if not consulta or clave.startswith(consulta)
+            if clave.startswith(consulta)
         ),
         key=str.casefold,
     )
@@ -216,35 +232,46 @@ class VentanaDecisionArea(tk.Toplevel):
 def pedir_decision_area(
     padre: tk.Misc, usuario: str, area: str, maestro: Maestro
 ) -> str | None:
-    """Solicita reutilizar, crear o corregir un área antes de asignarla."""
+    """Solicita reutilizar, crear o confirmar un área de forma directa y clara."""
 
     actual = str(area or "").strip()
-    while True:
-        resultado = catalogo_areas.validar_area(actual, maestro=maestro)
-        if not resultado.valido:
-            messagebox.showwarning("Área no válida", resultado.mensaje, parent=padre)
-            return None
-        if resultado.existente:
-            return resultado.area_reutilizable or resultado.nombre
-        dialogo = VentanaDecisionArea(
-            padre,
-            usuario=usuario,
-            area=actual,
-            resultado=resultado,
-            areas=catalogo_areas.catalogo_desde_maestro(maestro),
-        )
-        padre.wait_window(dialogo)
-        accion, valor = dialogo.decision
-        if accion == "cancelar":
-            return None
-        if accion == "corregir":
-            actual = valor
-            continue
-        if accion == "existente":
-            return valor
-        if accion == "nueva":
-            return valor
+    if not actual:
+        messagebox.showwarning("Área vacía", "El nombre del área no puede estar vacío.", parent=padre)
         return None
+
+    resultado = catalogo_areas.validar_area(actual, maestro=maestro)
+    if not resultado.valido:
+        messagebox.showwarning("Área no válida", resultado.mensaje, parent=padre)
+        return None
+    if resultado.existente:
+        return resultado.area_reutilizable or resultado.nombre
+
+    if resultado.similares:
+        mejor = resultado.similares[0]
+        respuesta = messagebox.askyesnocancel(
+            "Área similar detectada",
+            f"Para el usuario '{usuario}', escribió el área:\n  • \"{actual}\"\n\n"
+            f"En el catálogo ya existe un área similar:\n  • \"{mejor.nombre}\" ({mejor.similitud:.0%} de coincidencia)\n\n"
+            f"¿Desea usar el área existente '{mejor.nombre}'?\n\n"
+            f"• SÍ: Usa '{mejor.nombre}' (recomendado para no duplicar áreas).\n"
+            f"• NO: Registra '{actual}' como una NUEVA área.\n"
+            f"• Cancelar: Vuelve atrás sin guardar cambios.",
+            parent=padre,
+        )
+        if respuesta is True:
+            return mejor.nombre
+        if respuesta is False:
+            return actual
+        return None
+
+    if messagebox.askyesno(
+        "Registrar nueva área",
+        f"El área \"{actual}\" no existe en el catálogo.\n\n"
+        f"¿Confirma que desea crearla y asignarla a '{usuario}'?",
+        parent=padre,
+    ):
+        return actual
+    return None
 
 
 class VentanaValidacion(tk.Toplevel):
@@ -281,6 +308,7 @@ class VentanaValidacion(tk.Toplevel):
 
         self._var_busqueda = tk.StringVar()
         self._var_estado = tk.StringVar(value="Todos")
+        self._var_area_filtro = tk.StringVar(value="Todas")
         self._var_modo = tk.StringVar(value="Excel normal")
         self._var_resumen = tk.StringVar(value="")
         self._var_conexion = tk.StringVar(value="")
@@ -411,13 +439,30 @@ class VentanaValidacion(tk.Toplevel):
                 "Área vacía",
             ),
             state="readonly",
-            width=26,
+            width=24,
         )
         self._combo_estado.pack(side="left", padx=(6, 14))
         self._combo_estado.bind("<<ComboboxSelected>>", lambda _e: self._refrescar())
 
+        ttk.Label(marco, text="Área:").pack(side="left")
+        self._combo_area_filtro = ttk.Combobox(
+            marco,
+            textvariable=self._var_area_filtro,
+            values=["Todas"],
+            state="readonly",
+            width=20,
+        )
+        self._combo_area_filtro.pack(side="left", padx=(6, 14))
+        self._combo_area_filtro.bind("<<ComboboxSelected>>", lambda _e: self._refrescar())
+
         ttk.Button(
             marco, text="Actualizar", command=self._refrescar
+        ).pack(side="left", padx=(0, 8))
+
+        ttk.Button(
+            marco,
+            text="Revisar áreas repetidas",
+            command=self._abrir_revision_areas_repetidas,
         ).pack(side="left")
 
         self._pill_revision = Pill(
@@ -574,13 +619,23 @@ class VentanaValidacion(tk.Toplevel):
     # ------------------------------------------------------------------
     @staticmethod
     def _filtrar_registros(
-        registros: list[dict[str, Any]], busqueda: str, estado: str
+        registros: list[dict[str, Any]],
+        busqueda: str,
+        estado: str,
+        filtro_area: str = "Todas",
     ) -> list[dict[str, Any]]:
         busqueda = busqueda.strip().lower()
         salida = []
         for registro in registros:
             if estado != "Todos" and str(registro.get("estado")) != estado:
                 continue
+            if filtro_area != "Todas":
+                area_actual = str(registro.get("area_actual") or "").strip()
+                if filtro_area == "(Sin área)":
+                    if area_actual:
+                        continue
+                elif area_actual != filtro_area:
+                    continue
             if busqueda:
                 texto = " ".join(
                     str(registro.get(campo) or "")
@@ -606,9 +661,10 @@ class VentanaValidacion(tk.Toplevel):
         snapshot = [dict(registro) for registro in self.revision.registros]
         total_registros = self.revision.total_registros
         validado = self.revision.validado
+        filtro_area = self._var_area_filtro.get() if hasattr(self, "_var_area_filtro") else "Todas"
         self._refresco_tabla_pendiente = (
             version, snapshot, self._var_busqueda.get(), self._var_estado.get(),
-            total_registros, validado,
+            filtro_area, total_registros, validado,
         )
         if not self._refresco_tabla_en_curso:
             self._iniciar_refresco_tabla()
@@ -619,11 +675,11 @@ class VentanaValidacion(tk.Toplevel):
             return
         self._refresco_tabla_pendiente = None
         self._refresco_tabla_en_curso = True
-        version, snapshot, busqueda, estado, total_registros, validado = solicitud
+        version, snapshot, busqueda, estado, filtro_area, total_registros, validado = solicitud
 
-        def preparar() -> tuple[int, list[dict[str, Any]], Any, dict[str, int], float, int]:
+        def preparar() -> tuple[int, list[dict[str, Any]], Any, dict[str, int], float, int, list[str]]:
             inicio = time.perf_counter()
-            filtrados = self._filtrar_registros(snapshot, busqueda, estado)
+            filtrados = self._filtrar_registros(snapshot, busqueda, estado, filtro_area)
             config = cargar_configuracion()
             cantidad_validadas = sum(1 for registro in snapshot if validado(registro))
             resumen = {
@@ -632,12 +688,15 @@ class VentanaValidacion(tk.Toplevel):
                 "por_revisar": len(snapshot) - cantidad_validadas,
                 "total_usuarios": len(snapshot),
             }
+            areas_disponibles = sorted(
+                {str(r.get("area_actual") or "").strip() for r in snapshot if str(r.get("area_actual") or "").strip()}
+            )
             duracion = time.perf_counter() - inicio
             LOGGER.info(
                 "Rendimiento filtro_validacion: preparacion=%.3fs leidos=%s procesados=%s mostrados=%s consultas=0 errores=0",
                 duracion, len(snapshot), len(snapshot), len(filtrados),
             )
-            return version, filtrados, config, resumen, duracion, len(snapshot)
+            return version, filtrados, config, resumen, duracion, len(snapshot), areas_disponibles
 
         def tarea() -> Any:
             inicio_error = time.perf_counter()
@@ -663,8 +722,13 @@ class VentanaValidacion(tk.Toplevel):
         except tk.TclError:
             return
         if exito:
-            version, registros, config, resumen, _duracion, _leidos = contenido
+            version, registros, config, resumen, _duracion, _leidos, areas_disponibles = contenido
             if version == self._refresco_tabla_version:
+                if hasattr(self, "_combo_area_filtro"):
+                    valores_actuales = list(self._combo_area_filtro["values"])
+                    nuevos_valores = ["Todas", "(Sin área)", *areas_disponibles]
+                    if valores_actuales != nuevos_valores:
+                        self._combo_area_filtro["values"] = nuevos_valores
                 self._pintar_registros_filtrados(registros, config, resumen)
         else:
             version, exc, duracion, leidos = contenido
@@ -1691,6 +1755,96 @@ class VentanaValidacion(tk.Toplevel):
             "La generación falló. La revisión sigue disponible para reintentar."
         )
 
+    def _abrir_revision_areas_repetidas(self) -> None:
+        """Detecta áreas duplicadas o con nombres similares asignadas en la revisión."""
+        registros = self.revision.registros
+        conteo_areas: dict[str, list[dict[str, Any]]] = {}
+        for r in registros:
+            area = str(r.get("area_actual") or "").strip()
+            if area:
+                conteo_areas.setdefault(area, []).append(r)
+
+        if not conteo_areas:
+            messagebox.showinfo(
+                "Sin áreas asignadas",
+                "Todavía no hay áreas asignadas en esta revisión para analizar.",
+                parent=self,
+            )
+            return
+
+        grupos: list[dict[str, Any]] = []
+        areas_procesadas: set[str] = set()
+        lista_areas = list(conteo_areas.keys())
+
+        def _son_similares(a: str, b: str) -> float:
+            s1 = catalogo_areas.buscar_similares(a, [b], umbral=0.80)
+            s2 = catalogo_areas.buscar_similares(b, [a], umbral=0.80)
+            puntos = [s.similitud for s in s1 + s2]
+            return max(puntos) if puntos else 0.0
+
+        for i, area in enumerate(lista_areas):
+            if area in areas_procesadas:
+                continue
+            variantes = [area]
+            clave_norm = normalizar_area(area) or area.casefold()
+
+            for otra in lista_areas[i + 1:]:
+                if otra in areas_procesadas:
+                    continue
+                otra_norm = normalizar_area(otra) or otra.casefold()
+                if clave_norm == otra_norm or _son_similares(area, otra) >= 0.80:
+                    variantes.append(otra)
+
+            if len(variantes) > 1:
+                for v in variantes:
+                    areas_procesadas.add(v)
+                principal = max(
+                    variantes,
+                    key=lambda v: (len(conteo_areas.get(v, [])), v.isupper(), len(v)),
+                )
+                grupos.append({
+                    "canonico": principal,
+                    "variantes": variantes,
+                    "conteos": {v: len(conteo_areas.get(v, [])) for v in variantes},
+                    "total": sum(len(conteo_areas.get(v, [])) for v in variantes),
+                })
+
+        if not grupos:
+            messagebox.showinfo(
+                "Áreas unificadas",
+                f"¡Excelente! No se encontraron áreas repetidas o con nombres similares.\n"
+                f"Se revisaron {len(conteo_areas)} áreas asignadas en esta revisión.",
+                parent=self,
+            )
+            return
+
+        VentanaConsolidarAreas(
+            self,
+            grupos=grupos,
+            al_unificar=self._aplicar_unificacion_areas,
+        )
+
+    def _aplicar_unificacion_areas(self, mapeo: dict[str, str]) -> None:
+        """Aplica la unificación a los registros de la revisión."""
+        mapa_limpio = {k.strip(): v.strip() for k, v in mapeo.items() if k.strip() and v.strip()}
+        modificados = 0
+        for registro in self.revision.registros:
+            area_actual = str(registro.get("area_actual") or "").strip()
+            if area_actual in mapa_limpio:
+                nueva_area = mapa_limpio[area_actual]
+                usuario = str(registro.get("usuario") or "")
+                self.revision.actualizar(usuario, area=nueva_area)
+                modificados += 1
+
+        if modificados > 0:
+            self.revision.guardar()
+            self._refrescar()
+            messagebox.showinfo(
+                "Áreas unificadas",
+                f"Se unificaron exitosamente {len(mapa_limpio)} variantes de áreas en {modificados} registros.",
+                parent=self,
+            )
+
     def destroy(self) -> None:
         for after_id in (
             getattr(self, "_filtro_after_id", None),
@@ -1754,6 +1908,130 @@ class VentanaValidacion(tk.Toplevel):
 # ---------------------------------------------------------------------------
 # Diálogos auxiliares
 # ---------------------------------------------------------------------------
+class VentanaConsolidarAreas(tk.Toplevel):
+    """Permite revisar áreas repetidas o con nombres similares y unificarlas."""
+
+    def __init__(
+        self,
+        padre: tk.Misc,
+        *,
+        grupos: list[dict[str, Any]],
+        al_unificar: Callable[[dict[str, str]], None],
+    ) -> None:
+        super().__init__(padre)
+        self.title("Revisión y unificación de áreas repetidas")
+        self.geometry("740x500")
+        self.minsize(620, 380)
+        self.configure(bg=FONDO)
+        self.transient(padre)
+        self.grab_set()
+
+        self._grupos = grupos
+        self._al_unificar = al_unificar
+        self._controles: list[tuple[dict[str, Any], tk.StringVar]] = []
+
+        encabezado = ttk.Frame(self, padding=(18, 14, 18, 6))
+        encabezado.pack(fill="x")
+        ttk.Label(
+            encabezado,
+            text="Áreas repetidas o con nombres similares detectadas",
+            style="Seccion.TLabel",
+        ).pack(anchor="w")
+        ttk.Label(
+            encabezado,
+            text=(
+                "Se detectaron áreas con variaciones de mayúsculas, tildes o abreviaturas similares. "
+                "Seleccione el nombre oficial para unificar cada grupo:"
+            ),
+            style="Subtitulo.TLabel",
+            wraplength=680,
+        ).pack(anchor="w", pady=(4, 0))
+
+        contenedor = ttk.Frame(self, padding=(18, 6))
+        contenedor.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(contenedor, bg=FONDO, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(contenedor, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda _e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        for idx, grupo in enumerate(grupos, start=1):
+            cuadro = ttk.LabelFrame(
+                scrollable_frame,
+                text=f"Grupo {idx}: {grupo['total']} registros afectados",
+                padding=10,
+            )
+            cuadro.pack(fill="x", expand=True, pady=6, padx=4)
+
+            fila_canonico = ttk.Frame(cuadro)
+            fila_canonico.pack(fill="x", pady=(0, 6))
+            ttk.Label(fila_canonico, text="Nombre que se conservará:").pack(
+                side="left", padx=(0, 8)
+            )
+
+            var_canonico = tk.StringVar(value=grupo["canonico"])
+            combo_canonico = ttk.Combobox(
+                fila_canonico,
+                textvariable=var_canonico,
+                values=grupo["variantes"],
+                width=36,
+            )
+            combo_canonico.pack(side="left", fill="x", expand=True)
+            self._controles.append((grupo, var_canonico))
+
+            texto_variantes = "Variantes en revisión: " + " | ".join(
+                f"\"{v}\" ({grupo['conteos'].get(v, 0)} reg.)" for v in grupo["variantes"]
+            )
+            ttk.Label(
+                cuadro,
+                text=texto_variantes,
+                style="Subtitulo.TLabel",
+                wraplength=640,
+            ).pack(anchor="w")
+
+        botones = ttk.Frame(self, padding=(18, 10, 18, 14))
+        botones.pack(fill="x", side="bottom")
+
+        ttk.Button(
+            botones,
+            text="Unificar y aplicar cambios",
+            style="Principal.TButton",
+            command=self._guardar,
+        ).pack(side="right")
+        ttk.Button(botones, text="Cancelar", command=self.destroy).pack(
+            side="right", padx=(0, 8)
+        )
+
+    def _guardar(self) -> None:
+        mapeo: dict[str, str] = {}
+        for grupo, var in self._controles:
+            canonico = var.get().strip()
+            if not canonico:
+                continue
+            for v in grupo["variantes"]:
+                if v != canonico:
+                    mapeo[v] = canonico
+
+        if not mapeo:
+            messagebox.showinfo(
+                "Sin cambios", "Todas las áreas ya tenían el mismo nombre.", parent=self
+            )
+            self.destroy()
+            return
+
+        self._al_unificar(mapeo)
+        self.destroy()
+
+
 class VentanaAsignarArea(tk.Toplevel):
     def __init__(
         self,
@@ -1765,20 +2043,22 @@ class VentanaAsignarArea(tk.Toplevel):
         area_inicial: str = "",
     ) -> None:
         super().__init__(padre)
-        self.title("Asignar área")
-        self.geometry("520x230")
+        self.title("Asignar o agregar área")
+        self.geometry("560x280")
+        self.minsize(480, 250)
         self.configure(bg=FONDO)
         self.transient(padre)
         self.grab_set()
         self._al_guardar = al_guardar
         self._areas = filtrar_areas(areas)
+        self._sugerencia_actual: str = ""
 
         ttk.Label(
             self, text=f"Usuario: {usuario}", style="Seccion.TLabel"
-        ).pack(anchor="w", padx=18, pady=(16, 6))
+        ).pack(anchor="w", padx=18, pady=(16, 4))
         ttk.Label(
             self,
-            text="Seleccione un área existente o escriba una nueva.",
+            text="Escriba para buscar en el catálogo o agregar una nueva área:",
             style="Subtitulo.TLabel",
         ).pack(anchor="w", padx=18)
 
@@ -1787,51 +2067,120 @@ class VentanaAsignarArea(tk.Toplevel):
             self,
             textvariable=self._var_area,
             values=self._areas,
-            width=46,
+            width=50,
         )
-        combo.pack(fill="x", padx=18, pady=10)
+        combo.pack(fill="x", padx=18, pady=(8, 4))
         self._combo_area = combo
+
+        fila_sug = ttk.Frame(self)
+        fila_sug.pack(fill="x", padx=18, pady=(0, 8))
         self._var_estado_sugerencias = tk.StringVar(value="")
         ttk.Label(
-            self,
+            fila_sug,
             textvariable=self._var_estado_sugerencias,
             style="Subtitulo.TLabel",
-        ).pack(anchor="w", padx=18)
+        ).pack(side="left")
+
+        self._btn_usar_sug = ttk.Button(
+            fila_sug,
+            text="Usar sugerencia",
+            command=self._aplicar_sugerencia_rapida,
+        )
+
         combo.bind("<KeyRelease>", self._filtrar_sugerencias)
         combo.bind("<<ComboboxSelected>>", self._seleccionar_sugerencia)
         combo.focus_set()
 
         botones = ttk.Frame(self)
-        botones.pack(fill="x", padx=18, pady=(4, 16))
+        botones.pack(fill="x", padx=18, pady=(8, 16), side="bottom")
         ttk.Button(
             botones,
-            text="Guardar",
+            text="Guardar asignación",
             style="Principal.TButton",
             command=self._guardar,
         ).pack(side="right")
         ttk.Button(botones, text="Cancelar", command=self.destroy).pack(
             side="right", padx=(0, 8)
         )
+        self._filtrar_sugerencias()
+
+    def _aplicar_sugerencia_rapida(self) -> None:
+        if self._sugerencia_actual:
+            self._var_area.set(self._sugerencia_actual)
+            self._filtrar_sugerencias()
 
     def _filtrar_sugerencias(self, _evento=None) -> None:
-        texto = self._var_area.get()
-        opciones = filtrar_areas(self._areas, texto)
+        texto = self._var_area.get().strip()
+        opciones = filtrar_areas(self._areas, texto, contiene=True)
         self._combo_area.configure(values=opciones)
-        self._var_estado_sugerencias.set(
-            "No se encontraron áreas" if texto.strip() and not opciones else ""
+
+        self._sugerencia_actual = ""
+        self._btn_usar_sug.pack_forget()
+
+        if not texto:
+            self._var_estado_sugerencias.set("Seleccione una opción o escriba un nombre nuevo.")
+            return
+
+        match_exacto = next(
+            (op for op in self._areas if op.casefold() == texto.casefold()), None
         )
-        if opciones and texto.strip():
-            self._combo_area.event_generate("<Down>")
+        if match_exacto:
+            self._var_estado_sugerencias.set(f"✓ Área existente: '{match_exacto}'")
+            return
+
+        similares = catalogo_areas.buscar_similares(texto, self._areas, umbral=0.75)
+        if similares:
+            mejor = similares[0]
+            self._sugerencia_actual = mejor.nombre
+            self._var_estado_sugerencias.set(
+                f"Parecida a: '{mejor.nombre}' ({mejor.similitud:.0%})"
+            )
+            self._btn_usar_sug.pack(side="right")
+            return
+
+        self._var_estado_sugerencias.set("+ Se registrará como NUEVA área en el catálogo.")
 
     def _seleccionar_sugerencia(self, _evento=None) -> None:
-        self._var_estado_sugerencias.set("")
+        self._filtrar_sugerencias()
 
     def _guardar(self) -> None:
         area = self._var_area.get().strip()
         if not area:
-            messagebox.showwarning("Área vacía", "Indique un área válida.")
+            messagebox.showwarning("Área vacía", "Indique un área válida.", parent=self)
             return
-        self._al_guardar(area)
+
+        match_exacto = next(
+            (op for op in self._areas if op.casefold() == area.casefold()), None
+        )
+        if match_exacto:
+            area_final = match_exacto
+        elif self._sugerencia_actual:
+            resp = messagebox.askyesnocancel(
+                "Área similar detectada",
+                f"Escribió '{area}', pero ya existe '{self._sugerencia_actual}'.\n\n"
+                f"¿Desea usar '{self._sugerencia_actual}' en su lugar?\n\n"
+                f"• Sí: Usa '{self._sugerencia_actual}' (recomendado).\n"
+                f"• No: Crea '{area}' como una nueva área.\n"
+                f"• Cancelar: Vuelve a editar.",
+                parent=self,
+            )
+            if resp is True:
+                area_final = self._sugerencia_actual
+            elif resp is False:
+                area_final = area
+            else:
+                return
+        else:
+            if not messagebox.askyesno(
+                "Registrar nueva área",
+                f"El área '{area}' no existe en el catálogo.\n\n"
+                f"¿Confirma que desea crearla y registrarla?",
+                parent=self,
+            ):
+                return
+            area_final = area
+
+        self._al_guardar(area_final)
         self.destroy()
 
 

@@ -175,7 +175,7 @@ def usuarios_pendientes(
 ) -> list[dict[str, Any]]:
     """Devuelve los usuarios sin área detectados en el último procesamiento."""
 
-    if ruta_manifiesto is None:
+    if ruta_manifiesto is None or not str(ruta_manifiesto).strip():
         return []
     datos = leer_manifiesto(ruta_manifiesto)
     pendientes = datos.get("usuarios_pendientes") or []
