@@ -61,6 +61,9 @@ class Revision:
     id_ejecucion: str
     archivo_original: str = ""
     nombre_original: str = ""
+    # Etiqueta visible de la revisión. Es solo de presentación: nunca altera
+    # ``nombre_original``, los datos procesados ni el Excel del usuario.
+    nombre_revision: str = ""
     archivo_procesado: str = ""
     archivo_manifiesto: str = ""
     fecha_creacion: str = field(default_factory=_ahora)
@@ -84,6 +87,7 @@ class Revision:
         archivo_procesado: str = "",
         archivo_manifiesto: str = "",
         conflictos: Iterable[dict[str, Any]] = (),
+        nombre_revision: str = "",
     ) -> "Revision":
         if isinstance(datos_manifiesto, (str, Path)):
             ruta = Path(datos_manifiesto)
@@ -98,10 +102,12 @@ class Revision:
             raise ErrorArchivo("El manifiesto no tiene el formato esperado.")
 
         resoluciones = resoluciones or {}
+        nombre_entrada = str(datos_manifiesto.get("nombre_entrada") or "")
         revision = cls(
             id_ejecucion=str(datos_manifiesto.get("id_ejecucion") or ""),
             archivo_original=str(datos_manifiesto.get("archivo_entrada") or ""),
-            nombre_original=str(datos_manifiesto.get("nombre_entrada") or ""),
+            nombre_original=nombre_entrada,
+            nombre_revision=str(nombre_revision or nombre_entrada),
             archivo_procesado=str(archivo_procesado or ""),
             archivo_manifiesto=str(archivo_manifiesto or ""),
             total_registros=int(datos_manifiesto.get("resumen", {}).get("Total de registros") or 0),
@@ -230,12 +236,26 @@ class Revision:
         area = _area(registro.get("area_actual"))
         return estado == ESTADO_VALIDADO and bool(area)
 
+    @property
+    def id_revision(self) -> str:
+        """Identificador técnico de la revisión, independiente del nombre."""
+
+        return _limpiar_id(self.id_ejecucion)
+
+    @property
+    def nombre_visible(self) -> str:
+        """Etiqueta para listas y mensajes; no modifica ningún archivo."""
+
+        return self.nombre_revision or self.nombre_original
+
     def resumen(self) -> dict[str, Any]:
         self._recalcular()
         return {
             "id_ejecucion": self.id_ejecucion,
+            "id_revision": self.id_revision,
             "archivo_original": self.archivo_original,
             "nombre_original": self.nombre_original,
+            "nombre_revision": self.nombre_visible,
             "total_registros": self.total_registros,
             "areas_validadas": self.areas_validadas,
             "por_revisar": self.cantidad_pendientes,
@@ -454,8 +474,10 @@ class Revision:
         return {
             "version": 1,
             "id_ejecucion": self.id_ejecucion,
+            "id_revision": self.id_revision,
             "archivo_original": self.archivo_original,
             "nombre_original": self.nombre_original,
+            "nombre_revision": self.nombre_visible,
             "archivo_procesado": self.archivo_procesado,
             "archivo_manifiesto": self.archivo_manifiesto,
             "fecha_creacion": self.fecha_creacion,
@@ -501,13 +523,24 @@ class Revision:
             revision.registros = []
         if not isinstance(revision.historial, list):
             revision.historial = []
+        # Compatibilidad con revisiones creadas antes de existir la etiqueta.
+        if not revision.nombre_revision:
+            revision.nombre_revision = revision.nombre_original
         return revision.reabrir()
 
     def eliminar(self) -> bool:
-        if self.ruta and self.ruta.is_file():
-            self.ruta.unlink()
-            return True
-        return False
+        """Elimina el JSON de la revisión si está dentro de la carpeta segura."""
+
+        if not self.ruta:
+            return False
+        if not _ruta_revision_segura(self.ruta):
+            LOGGER.warning(
+                "Se rechazó el borrado de una ruta que no es una revisión: %s",
+                self.ruta,
+            )
+            return False
+        self.ruta.unlink()
+        return True
 
 
 def listar_revisiones(carpeta: Path | str | None = None) -> list[dict[str, Any]]:
@@ -525,14 +558,20 @@ def listar_revisiones(carpeta: Path | str | None = None) -> list[dict[str, Any]]
         if not isinstance(datos, dict):
             continue
         resumen = datos.get("resumen") if isinstance(datos.get("resumen"), dict) else {}
+        nombre_original = str(
+            datos.get("nombre_original") or datos.get("archivo_original") or ""
+        )
         salida.append(
             {
                 "ruta": str(archivo),
                 "id_ejecucion": str(datos.get("id_ejecucion") or ""),
-                "nombre_original": str(
-                    datos.get("nombre_original")
-                    or datos.get("archivo_original")
-                    or ""
+                "id_revision": str(
+                    datos.get("id_revision")
+                    or _limpiar_id(str(datos.get("id_ejecucion") or archivo.stem))
+                ),
+                "nombre_original": nombre_original,
+                "nombre_revision": str(
+                    datos.get("nombre_revision") or nombre_original
                 ),
                 "actualizado": str(datos.get("actualizado") or ""),
                 "total_registros": int(
@@ -560,3 +599,203 @@ def buscar_revision_reciente(nombre_original: str) -> Path | None:
         if Path(str(item.get("nombre_original") or "")).name.lower() == objetivo:
             return Path(str(item["ruta"]))
     return None
+
+
+# ----------------------------------------------------------------------
+# Nombres visibles y borrado seguro
+# ----------------------------------------------------------------------
+_PATRON_SUFIJO = re.compile(r"\s*\((\d+)\)\s*$")
+
+
+def _nombre_archivo(nombre: Any) -> str:
+    return Path(str(nombre or "")).name.strip()
+
+
+def _partir_nombre(nombre: Any) -> tuple[str, str, int | None]:
+    """Separa ``tickets (2).xlsx`` en ``("tickets", ".xlsx", 2)``."""
+
+    archivo = _nombre_archivo(nombre)
+    if not archivo:
+        return "", "", None
+    sufijo = Path(archivo).suffix
+    tallo = archivo[: len(archivo) - len(sufijo)] if sufijo else archivo
+    coincidencia = _PATRON_SUFIJO.search(tallo)
+    if coincidencia:
+        recortado = tallo[: coincidencia.start()].rstrip()
+        if recortado:
+            return recortado, sufijo, int(coincidencia.group(1))
+    return tallo or archivo, sufijo, None
+
+
+def nombre_sin_sufijo(nombre: Any) -> str:
+    """Devuelve el nombre del Excel sin el sufijo numérico de revisión."""
+
+    tallo, sufijo, _ = _partir_nombre(nombre)
+    return f"{tallo}{sufijo}" if tallo else _nombre_archivo(nombre)
+
+
+def clave_nombre(nombre: Any) -> str:
+    """Clave de comparación: solo el nombre del archivo, sin ruta."""
+
+    return nombre_sin_sufijo(nombre).casefold()
+
+
+def revisiones_con_nombre(
+    nombre: Any,
+    revisiones: Iterable[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Revisiones existentes del mismo Excel (comparación solo por nombre)."""
+
+    objetivo = clave_nombre(nombre)
+    if not objetivo:
+        return []
+    origen = listar_revisiones() if revisiones is None else list(revisiones)
+    return [
+        item
+        for item in origen
+        if clave_nombre(
+            item.get("nombre_revision") or item.get("nombre_original") or ""
+        )
+        == objetivo
+    ]
+
+
+def siguiente_nombre_revision(
+    nombre: Any,
+    revisiones: Iterable[dict[str, Any]] | None = None,
+) -> str:
+    """Etiqueta ``nombre (n)`` con el primer número libre disponible."""
+
+    tallo, sufijo, _ = _partir_nombre(nombre)
+    if not tallo:
+        tallo, sufijo = "revision", ""
+    origen = listar_revisiones() if revisiones is None else list(revisiones)
+    usados: set[int] = set()
+    for item in origen:
+        etiqueta = item.get("nombre_revision") or item.get("nombre_original") or ""
+        otro_tallo, otro_sufijo, numero = _partir_nombre(etiqueta)
+        if (
+            otro_tallo.casefold() == tallo.casefold()
+            and otro_sufijo.casefold() == sufijo.casefold()
+        ):
+            usados.add(numero or 0)
+    numero = 1
+    while numero in usados:
+        numero += 1
+    return f"{tallo} ({numero}){sufijo}"
+
+
+def _ruta_revision_segura(ruta: Path | str) -> bool:
+    """Solo permite borrar JSON de revisión dentro de la carpeta configurada."""
+
+    archivo = Path(ruta)
+    try:
+        if not archivo.is_file():
+            return False
+        if not archivo.name.startswith("revision_"):
+            return False
+        if archivo.suffix.lower() != ".json":
+            return False
+        return archivo.parent.resolve() == carpeta_revisiones().resolve()
+    except OSError:
+        return False
+
+
+def verificar_revision_guardada(ruta: Path | str) -> Revision:
+    """Comprueba que una revisión recién guardada es legible y coherente.
+
+    Se usa antes de eliminar revisiones anteriores para no perder trabajo si
+    la nueva quedó incompleta o corrupta.
+    """
+
+    archivo = Path(ruta)
+    if not archivo.is_file():
+        raise ErrorArchivo(f"La revisión nueva no se encontró en disco: {archivo}")
+    try:
+        datos = json.loads(archivo.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ErrorArchivo(f"La revisión nueva no se puede leer: {exc}") from exc
+    if not isinstance(datos, dict):
+        raise ErrorArchivo("La revisión nueva no tiene el formato esperado.")
+    if not str(datos.get("id_ejecucion") or "").strip():
+        raise ErrorArchivo("La revisión nueva no tiene identificador de ejecución.")
+    if not isinstance(datos.get("registros"), list):
+        raise ErrorArchivo("La revisión nueva no contiene su lista de registros.")
+    revision = Revision.cargar(archivo)
+    if not revision.id_ejecucion:
+        raise ErrorArchivo("La revisión nueva no se pudo interpretar correctamente.")
+    return revision
+
+
+def eliminar_revisiones(
+    rutas: Iterable[Path | str],
+    *,
+    abierta: str = "",
+) -> tuple[list[str], list[str]]:
+    """Elimina revisiones con validación de carpeta y de revisión abierta.
+
+    Devuelve ``(eliminadas, errores)``. Nunca lanza: los fallos se informan
+    para que la interfaz los muestre y las revisiones previas se conserven.
+    """
+
+    eliminadas: list[str] = []
+    errores: list[str] = []
+    abierta_clave = ""
+    if abierta:
+        try:
+            abierta_clave = str(Path(abierta).resolve())
+        except OSError:
+            abierta_clave = str(abierta)
+
+    for ruta in rutas:
+        archivo = Path(ruta)
+        try:
+            if abierta_clave and str(archivo.resolve()) == abierta_clave:
+                errores.append(
+                    f"{archivo.name}: está abierta en la ventana de validación."
+                )
+                continue
+            if not _ruta_revision_segura(archivo):
+                errores.append(
+                    f"{archivo.name}: no es una revisión válida dentro de "
+                    f"{carpeta_revisiones()}."
+                )
+                continue
+            archivo.unlink()
+            eliminadas.append(str(archivo))
+        except OSError as exc:
+            errores.append(f"{archivo.name}: {exc}")
+    return eliminadas, errores
+
+
+def sobrescribir_revisiones(
+    nueva: Path | str,
+    anteriores: Iterable[Path | str],
+    *,
+    abierta: str = "",
+) -> tuple[list[str], list[str]]:
+    """Reemplaza revisiones anteriores solo si la nueva es válida.
+
+    Primero verifica que la revisión nueva existe, se puede leer y tiene los
+    campos mínimos. Si esa verificación falla, lanza ``ErrorArchivo`` y no
+    elimina absolutamente nada. La revisión nueva nunca se borra a sí misma.
+    """
+
+    revision = verificar_revision_guardada(nueva)
+    try:
+        nueva_clave = str(Path(revision.ruta or nueva).resolve())
+    except OSError:
+        nueva_clave = str(Path(nueva))
+
+    pendientes: list[str] = []
+    for ruta in anteriores:
+        texto = str(ruta or "")
+        if not texto:
+            continue
+        try:
+            if str(Path(texto).resolve()) == nueva_clave:
+                continue
+        except OSError:
+            pass
+        pendientes.append(texto)
+    return eliminar_revisiones(pendientes, abierta=abierta)
