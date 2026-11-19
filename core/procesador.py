@@ -285,6 +285,7 @@ def _crear_revision(
     *,
     archivo_procesado: str,
     archivo_manifiesto: str,
+    nombre_revision: str = "",
 ) -> str | None:
     try:
         revision = Revision.desde_manifiesto(
@@ -296,6 +297,7 @@ def _crear_revision(
             archivo_procesado=archivo_procesado,
             archivo_manifiesto=archivo_manifiesto,
             conflictos=conflictos,
+            nombre_revision=nombre_revision,
         )
         return str(revision.guardar())
     except Exception as exc:  # noqa: BLE001 - la revisión no bloquea la salida
@@ -321,6 +323,7 @@ def procesar_archivo(
     crear_respaldo: bool = False,
     crear_copia_revision: bool = False,
     asignaciones_revision: dict[str, str] | None = None,
+    revision_nombre: str = "",
 ) -> EstadisticasProcesamiento:
     """Procesa un Excel, asigna áreas y genera el archivo de 11 columnas.
 
@@ -748,6 +751,7 @@ def procesar_archivo(
             conflictos,
             archivo_procesado=str(destino),
             archivo_manifiesto=archivo_manifiesto or "",
+            nombre_revision=revision_nombre,
         )
 
     estadisticas = EstadisticasProcesamiento(
