@@ -892,6 +892,11 @@ def _abrir(ruta: Path | str) -> None:
 class AplicacionTk(tk.Tk):
     """Ventana principal del sistema."""
 
+    # Valores por defecto a nivel de clase: las instancias creadas sin
+    # ``__init__`` (pruebas o dobles) no disparan ``__getattr__`` de Tkinter.
+    _sobrescritura_revision_pendiente: dict[str, Any] | None = None
+    _ventana_validacion: Any = None
+
     def __init__(self) -> None:
         super().__init__()
         self._inicio_carga_aplicacion = time.perf_counter()
@@ -920,6 +925,7 @@ class AplicacionTk(tk.Tk):
         self._hoja_entrada_actual: str | None = None
         self._ruta_revision_actual: str = ""
         self._revision_actual: Any = None
+        self._sobrescritura_revision_pendiente: dict[str, Any] | None = None
         self._ventana_validacion: Any = None
         self._ultima_copia_revision: str = ""
         self._estadisticas_actuales: Any = None
@@ -2085,6 +2091,29 @@ class AplicacionTk(tk.Tk):
         self._ruta_entrada_actual = str(ruta)
         self._hoja_entrada_actual = hoja
 
+        # La decisión sobre revisiones existentes se toma en el hilo de la
+        # interfaz: dentro del procesamiento no se pueden mostrar diálogos.
+        nombre_revision = ruta.name
+        rutas_sobrescribir: list[str] = []
+        self._sobrescritura_revision_pendiente = None
+        existentes = svc_revision.revisiones_con_nombre(ruta.name)
+        if existentes:
+            decision = self._preguntar_conflicto_revision(ruta.name, existentes)
+            if decision is None:
+                self._var_etapa.set("Procesamiento cancelado por el usuario.")
+                return
+            if decision == "sobrescribir":
+                rutas_sobrescribir = [str(item["ruta"]) for item in existentes]
+            else:
+                nombre_revision = svc_revision.siguiente_nombre_revision(
+                    ruta.name, existentes
+                )
+        self._sobrescritura_revision_pendiente = (
+            {"rutas": rutas_sobrescribir, "nombre": ruta.name}
+            if rutas_sobrescribir
+            else None
+        )
+
         self._iniciar_ocupado("Procesando archivo…")
         self._barra.configure(mode="indeterminate")
         self._barra.start(12)
@@ -2102,6 +2131,7 @@ class AplicacionTk(tk.Tk):
                     modo=cfg.MODO_NORMAL,
                     permitir_pendientes=True,
                     crear_revision=True,
+                    revision_nombre=nombre_revision,
                 )
 
         self._ejecutar_hilo(tarea, self._fin_procesar, "procesamiento")
@@ -2117,6 +2147,7 @@ class AplicacionTk(tk.Tk):
         ) or ""
         ruta_revision = getattr(estadisticas, "ruta_revision", "") or ""
         self._ruta_revision_actual = ruta_revision
+        self._resolver_sobrescritura_revision(ruta_revision)
         for nombre in ("_btn_generar_normal", "_btn_generar_detalle"):
             boton = self.__dict__.get(nombre)
             if boton is not None:
@@ -2358,7 +2389,7 @@ class AplicacionTk(tk.Tk):
     def _elegir_revision(self, revisiones: list[dict[str, Any]]) -> dict[str, Any] | None:
         ventana = tk.Toplevel(self)
         ventana.title("Reanudar revisión")
-        ventana.geometry("720x380")
+        ventana.geometry("760x420")
         ventana.transient(self)
         ventana.grab_set()
         ventana.configure(bg=COLOR_FONDO)
@@ -2370,22 +2401,42 @@ class AplicacionTk(tk.Tk):
         ).pack(anchor="w", padx=16, pady=(14, 8))
         marco = ttk.Frame(ventana)
         marco.pack(fill="both", expand=True, padx=16)
-        lista = tk.Listbox(marco, height=10)
+        lista = tk.Listbox(marco, height=11)
         barra = ttk.Scrollbar(marco, orient="vertical", command=lista.yview)
         lista.configure(yscrollcommand=barra.set)
         lista.pack(side="left", fill="both", expand=True)
         barra.pack(side="right", fill="y")
-        for item in revisiones:
-            lista.insert(
-                tk.END,
-                f"{item['nombre_original'] or 'Sin nombre'} | "
-                f"{item['actualizado'] or 'sin fecha'} | "
-                f"por revisar: {item['por_revisar']}",
-            )
-        if revisiones:
-            lista.selection_set(0)
 
         elegido: dict[str, Any] = {}
+        botones = ttk.Frame(ventana)
+        botones.pack(fill="x", padx=16, pady=12)
+        btn_abrir = ttk.Button(botones, text="Abrir")
+        btn_eliminar = ttk.Button(botones, text="Eliminar")
+        btn_abrir.pack(side="right")
+        btn_eliminar.pack(side="right", padx=8)
+        ttk.Button(botones, text="Cancelar", command=ventana.destroy).pack(
+            side="right"
+        )
+
+        def pintar(seleccionar: int | None = 0) -> None:
+            lista.delete(0, tk.END)
+            for item in revisiones:
+                etiqueta = item.get("nombre_revision") or item.get("nombre_original")
+                lista.insert(
+                    tk.END,
+                    f"{etiqueta or 'Sin nombre'} | "
+                    f"{item['actualizado'] or 'sin fecha'} | "
+                    f"por revisar: {item['por_revisar']}",
+                )
+            if revisiones:
+                indice = 0 if seleccionar is None else min(
+                    max(seleccionar, 0), len(revisiones) - 1
+                )
+                lista.selection_set(indice)
+                lista.see(indice)
+            estado = "normal" if revisiones else "disabled"
+            btn_abrir.configure(state=estado)
+            btn_eliminar.configure(state=estado)
 
         def confirmar() -> None:
             seleccion = lista.curselection()
@@ -2394,15 +2445,228 @@ class AplicacionTk(tk.Tk):
             elegido.update(revisiones[seleccion[0]])
             ventana.destroy()
 
-        botones = ttk.Frame(ventana)
-        botones.pack(fill="x", padx=16, pady=12)
-        ttk.Button(botones, text="Abrir", command=confirmar).pack(side="right")
-        ttk.Button(botones, text="Cancelar", command=ventana.destroy).pack(
-            side="right", padx=8
-        )
+        def eliminar() -> None:
+            seleccion = lista.curselection()
+            if not seleccion:
+                return
+            item = revisiones[seleccion[0]]
+            ruta = str(item.get("ruta") or "")
+            etiqueta = item.get("nombre_revision") or item.get("nombre_original")
+            abierta = self._ruta_revision_abierta()
+            if abierta and ruta and Path(abierta).resolve() == Path(ruta).resolve():
+                messagebox.showwarning(
+                    "Revisión abierta",
+                    f"La revisión «{etiqueta or 'Sin nombre'}» está abierta en la "
+                    "ventana «Validación de Usuarios y Áreas».\n\n"
+                    "Cierre esa ventana antes de eliminarla.",
+                    parent=ventana,
+                )
+                return
+            if not messagebox.askyesno(
+                "Eliminar revisión",
+                f"¿Eliminar definitivamente la revisión?\n\n"
+                f"Nombre: {etiqueta or 'Sin nombre'}\n"
+                f"Actualizada: {item.get('actualizado') or 'sin fecha'}\n"
+                f"Áreas validadas: {item.get('areas_validadas', 0)}\n"
+                f"Por revisar: {item.get('por_revisar', 0)}\n\n"
+                "Se borrará el estado guardado (el Excel original no se toca). "
+                "Esta acción no se puede deshacer.",
+                parent=ventana,
+            ):
+                return
+            eliminadas, errores = svc_revision.eliminar_revisiones([ruta])
+            if eliminadas:
+                LOGGER.info("Revisión eliminada por el usuario: %s", ruta)
+            if errores:
+                messagebox.showerror(
+                    "No se pudo eliminar",
+                    "\n".join(errores),
+                    parent=ventana,
+                )
+            revisiones[:] = svc_revision.listar_revisiones()
+            if not revisiones:
+                messagebox.showinfo(
+                    "Sin revisiones",
+                    "Ya no quedan revisiones guardadas.",
+                    parent=ventana,
+                )
+                ventana.destroy()
+                return
+            pintar(seleccion[0])
+
+        btn_abrir.configure(command=confirmar)
+        btn_eliminar.configure(command=eliminar)
         lista.bind("<Double-1>", lambda _e: confirmar())
+        pintar(0)
         self.wait_window(ventana)
         return elegido or None
+
+    def _ruta_revision_abierta(self) -> str:
+        """Ruta de la revisión cargada en la ventana de validación, si sigue viva."""
+
+        ventana = getattr(self, "_ventana_validacion", None)
+        if ventana is None:
+            return ""
+        try:
+            if not ventana.winfo_exists():
+                return ""
+        except Exception:  # noqa: BLE001 - una ventana destruida no bloquea
+            return ""
+        revision = getattr(ventana, "revision", None)
+        ruta = getattr(revision, "ruta", None)
+        return str(ruta) if ruta else ""
+
+    def _preguntar_conflicto_revision(
+        self, nombre: str, existentes: list[dict[str, Any]]
+    ) -> str | None:
+        """Pregunta si se sobrescribe la revisión existente o se crea otra.
+
+        Devuelve ``"sobrescribir"``, ``"nueva"`` o ``None`` si se cancela.
+        """
+
+        abierta = self._ruta_revision_abierta()
+        abierta_clave = ""
+        if abierta:
+            try:
+                abierta_clave = str(Path(abierta).resolve())
+            except OSError:
+                abierta_clave = abierta
+
+        def es_abierta(item: dict[str, Any]) -> bool:
+            if not abierta_clave:
+                return False
+            try:
+                return str(Path(str(item.get("ruta") or "")).resolve()) == abierta_clave
+            except OSError:
+                return False
+
+        ventana = tk.Toplevel(self)
+        ventana.title("Revisión existente")
+        ventana.geometry("620x380")
+        ventana.transient(self)
+        ventana.grab_set()
+        ventana.configure(bg=COLOR_FONDO)
+
+        ttk.Label(
+            ventana,
+            text=f"Ya existe una revisión para «{nombre}»",
+            style="Seccion.TLabel",
+        ).pack(anchor="w", padx=16, pady=(14, 6))
+        ttk.Label(
+            ventana,
+            text=(
+                "¿Desea sobrescribir la revisión existente con este nuevo archivo?\n"
+                "Si elige «No», se guardará como "
+                f"«{svc_revision.siguiente_nombre_revision(nombre, existentes)}»."
+            ),
+            justify="left",
+        ).pack(anchor="w", padx=16)
+        detalle = tk.Listbox(ventana, height=6)
+        detalle.pack(fill="both", expand=True, padx=16, pady=8)
+        for item in existentes:
+            etiqueta = item.get("nombre_revision") or item.get("nombre_original")
+            detalle.insert(
+                tk.END,
+                f"{etiqueta or 'Sin nombre'} | "
+                f"{item.get('actualizado') or 'sin fecha'} | "
+                f"validadas: {item.get('areas_validadas', 0)} | "
+                f"por revisar: {item.get('por_revisar', 0)}"
+                + ("  [ABIERTA]" if es_abierta(item) else ""),
+            )
+
+        aviso = ttk.Label(ventana, text="", wraplength=580, justify="left")
+        aviso.pack(anchor="w", padx=16)
+        if any(es_abierta(item) for item in existentes):
+            aviso.configure(
+                text=(
+                    "La revisión está abierta en la ventana de validación: "
+                    "ciérrela antes de sobrescribirla."
+                )
+            )
+
+        decision: dict[str, str | None] = {"valor": None}
+
+        def elegir(valor: str | None) -> None:
+            decision["valor"] = valor
+            ventana.destroy()
+
+        botones = ttk.Frame(ventana)
+        botones.pack(fill="x", padx=16, pady=12)
+        btn_sobrescribir = ttk.Button(
+            botones,
+            text="Sí, sobrescribir",
+            command=lambda: elegir("sobrescribir"),
+        )
+        btn_sobrescribir.pack(side="right")
+        ttk.Button(
+            botones,
+            text="No, guardar como nueva",
+            command=lambda: elegir("nueva"),
+        ).pack(side="right", padx=8)
+        ttk.Button(botones, text="Cancelar", command=lambda: elegir(None)).pack(
+            side="right"
+        )
+        if any(es_abierta(item) for item in existentes):
+            btn_sobrescribir.configure(state="disabled")
+        ventana.protocol("WM_DELETE_WINDOW", lambda: elegir(None))
+        self.wait_window(ventana)
+        return decision["valor"]
+
+    def _resolver_sobrescritura_revision(self, ruta_nueva: str) -> None:
+        """Aplica la sobrescritura solo si la nueva revisión es válida."""
+
+        pendiente = getattr(self, "_sobrescritura_revision_pendiente", None)
+        self._sobrescritura_revision_pendiente = None
+        if not pendiente:
+            return
+        rutas = [str(ruta) for ruta in pendiente.get("rutas") or [] if str(ruta)]
+        if not rutas:
+            return
+        if not ruta_nueva:
+            messagebox.showinfo(
+                "Revisiones conservadas",
+                "El nuevo procesamiento no generó una revisión (no había "
+                "pendientes), por lo que se conservaron las revisiones "
+                f"anteriores de «{pendiente.get('nombre') or 'este archivo'}».",
+            )
+            return
+        try:
+            svc_revision.verificar_revision_guardada(ruta_nueva)
+        except Exception as exc:  # noqa: BLE001 - nunca borrar sin verificar
+            LOGGER.error("La revisión nueva no es válida; no se sobrescribe: %s", exc)
+            messagebox.showerror(
+                "Sobrescritura cancelada",
+                "La revisión nueva no se pudo verificar, por lo que se "
+                "conservaron las revisiones anteriores.\n\n"
+                f"Detalle: {exc}\n\n"
+                f"Revisión generada: {cfg.ruta_visible(Path(ruta_nueva))}",
+            )
+            return
+        try:
+            eliminadas, errores = svc_revision.sobrescribir_revisiones(
+                ruta_nueva, rutas, abierta=self._ruta_revision_abierta()
+            )
+        except Exception as exc:  # noqa: BLE001 - se conserva todo
+            LOGGER.error("No se pudo sobrescribir la revisión: %s", exc)
+            messagebox.showerror(
+                "Sobrescritura cancelada",
+                "No se pudo validar la revisión nueva, por lo que se "
+                f"conservaron las revisiones anteriores.\n\nDetalle: {exc}",
+            )
+            return
+        LOGGER.info(
+            "Sobrescritura de revisión para %s: eliminadas=%s errores=%s",
+            pendiente.get("nombre"),
+            len(eliminadas),
+            len(errores),
+        )
+        if errores:
+            messagebox.showwarning(
+                "Sobrescritura parcial",
+                "La revisión nueva quedó guardada, pero algunas revisiones "
+                "anteriores no se pudieron eliminar:\n\n" + "\n".join(errores),
+            )
+
 
     # ------------------------------------------------------------------
     # Generación de Excel
