@@ -13,6 +13,7 @@ from docx.table import Table
 
 ENCABEZADOS_TABLA = {
     "resumen_tipo_atencion": ("TIPO DE ATENCION", "TIEMPO(H)", "%"),
+    "responsables": ("RESPONSABLE DE ATENCION", "TIEMPO(H)", "%"),
     "proyectos": ("PROYECTOS", "TIEMPO(H)", "%"),
     "tickets_tipo": ("TIPO DE ACTIVIDAD", "TICKETS", "%"),
     "areas": ("AREAS", "TICKETS", "%"),
@@ -20,6 +21,16 @@ ENCABEZADOS_TABLA = {
         "TIPO DE ATENCION", "DETALLE", "FECHA", "USUARIO", "AREA_USUARIO", "HORAS"
     ),
 }
+
+# La plantilla nueva titula la tabla de áreas en singular. Se aceptan ambas
+# variantes para no depender de una versión concreta de la plantilla.
+ENCABEZADOS_ALTERNATIVOS = {
+    "areas": (("ÁREA", "TICKETS", "%"),),
+}
+
+# La tabla de responsables solo existe en la plantilla nueva; en la anterior se
+# omite sin invalidar el documento.
+TABLAS_OPCIONALES = frozenset({"responsables"})
 
 
 class ErrorTablaDocx(ValueError):
@@ -44,19 +55,39 @@ def _encabezado(tabla: Table) -> tuple[str, ...]:
     return tuple(_clave(celda.text.strip()) for celda in tabla.rows[0].cells)
 
 
-def localizar_tablas_docx(documento: DocumentType) -> dict[str, Table]:
-    """Localiza las cinco tablas por todos sus encabezados, no solo el primero."""
+def _encabezados_aceptados(nombre: str) -> tuple[tuple[str, ...], ...]:
+    """Todas las variantes válidas de encabezado para una tabla lógica."""
 
-    requeridos = {nombre: tuple(_clave(x) for x in encabezado) for nombre, encabezado in ENCABEZADOS_TABLA.items()}
+    cabeceras = (ENCABEZADOS_TABLA[nombre],) + tuple(
+        ENCABEZADOS_ALTERNATIVOS.get(nombre, ())
+    )
+    return tuple(tuple(_clave(x) for x in cabecera) for cabecera in cabeceras)
+
+
+def localizar_tablas_docx(documento: DocumentType) -> dict[str, Table]:
+    """Localiza por todos sus encabezados, no solo el primero.
+
+    Devuelve las tablas reconocidas que existan en el documento. La tabla de
+    responsables es opcional para seguir aceptando la plantilla anterior.
+    """
+
+    requeridos = {
+        nombre: _encabezados_aceptados(nombre)
+        for nombre in ENCABEZADOS_TABLA
+    }
     encontradas: dict[str, Table] = {}
     for tabla in documento.tables:
         cabecera = _encabezado(tabla)
-        for nombre, esperado in requeridos.items():
-            if cabecera == esperado:
+        for nombre, variantes in requeridos.items():
+            if cabecera in variantes:
                 if nombre in encontradas:
                     raise ErrorTablaDocx(f"La plantilla contiene más de una tabla '{nombre}'.")
                 encontradas[nombre] = tabla
-    faltantes = [nombre for nombre in requeridos if nombre not in encontradas]
+    faltantes = [
+        nombre
+        for nombre in requeridos
+        if nombre not in encontradas and nombre not in TABLAS_OPCIONALES
+    ]
     if faltantes:
         raise ErrorTablaDocx("No se encontraron las tablas: " + ", ".join(faltantes))
     return encontradas
@@ -113,8 +144,7 @@ def actualizar_tabla_docx(
     if not tabla.rows:
         raise ErrorTablaDocx(f"La tabla '{nombre}' no tiene encabezado.")
     cabecera = tuple(_clave(celda.text.strip()) for celda in tabla.rows[0].cells)
-    esperado = tuple(_clave(x) for x in ENCABEZADOS_TABLA[nombre])
-    if cabecera != esperado:
+    if cabecera not in _encabezados_aceptados(nombre):
         raise ErrorTablaDocx(f"Los encabezados de la tabla '{nombre}' no coinciden con la plantilla.")
 
     filas_actuales = list(tabla.rows)
@@ -158,6 +188,11 @@ def actualizar_tablas_docx(
     if desconocidas:
         raise ErrorTablaDocx("Tablas desconocidas: " + ", ".join(sorted(desconocidas)))
     tablas = localizar_tablas_docx(documento)
+    no_presentes = set(filas_por_tabla) - set(tablas)
+    if no_presentes:
+        raise ErrorTablaDocx(
+            "La plantilla no contiene las tablas: " + ", ".join(sorted(no_presentes))
+        )
     totales = totales_por_tabla or {}
     totales_sin_filas = set(totales) - set(filas_por_tabla)
     if totales_sin_filas:

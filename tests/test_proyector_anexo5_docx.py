@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 import hashlib
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
@@ -25,7 +26,7 @@ from core.proyector_anexo5_docx import ErrorProyeccionAnexo5, preparar_contenido
 from core.esquema import COLUMNAS_OFICIALES
 
 
-PLANTILLA = BASE_DIR / "plantillas" / "anexo_5_plantilla.docx"
+PLANTILLA = BASE_DIR / "plantillas" / "Anexo5_año_mes.docx"
 EXCEL_REAL = BASE_DIR / "output" / "consulta_septiembre_2026_procesado.xlsx"
 EXCEL_AGOSTO = BASE_DIR / "output" / "consulta_agosto_2026_procesado.xlsx"
 
@@ -62,16 +63,18 @@ class TestProyectorAnexo5Docx(unittest.TestCase):
     def test_generacion_integrada_agosto_coincidente_con_plantilla(self):
         if not EXCEL_AGOSTO.is_file():
             self.skipTest("No está disponible el Excel procesado de agosto.")
-        hash_plantilla = hashlib.sha256(PLANTILLA.read_bytes()).hexdigest()
         datos = leer_excel_informe(EXCEL_AGOSTO)
         stats = calcular_estadisticas_informe(datos)
         contenido = preparar_contenido_anexo5(datos, stats)
         self.assertEqual(stats.periodo, (2026, 8))
 
         with tempfile.TemporaryDirectory(prefix="anexo5-integracion-agosto-") as carpeta:
+            plantilla = Path(carpeta) / "plantilla.docx"
+            shutil.copy2(PLANTILLA, plantilla)
+            hash_plantilla = hashlib.sha256(plantilla.read_bytes()).hexdigest()
             salida = Path(carpeta) / "Anexo5_agosto.docx"
             resultado = generar_anexo5_docx(
-                PLANTILLA,
+                plantilla,
                 salida,
                 reemplazos_texto=contenido.reemplazos_texto,
                 filas_por_tabla=contenido.filas_por_tabla,
@@ -80,8 +83,18 @@ class TestProyectorAnexo5Docx(unittest.TestCase):
             )
             doc = Document(salida)
             tablas = localizar_tablas_docx(doc)
-            self.assertEqual(len(doc.inline_shapes), 4)
-            self.assertEqual(set(tablas), {"resumen_tipo_atencion", "proyectos", "tickets_tipo", "areas", "detalle"})
+            self.assertEqual(len(doc.inline_shapes), 3)
+            self.assertEqual(
+                set(tablas),
+                {
+                    "resumen_tipo_atencion",
+                    "responsables",
+                    "proyectos",
+                    "tickets_tipo",
+                    "areas",
+                    "detalle",
+                },
+            )
             for nombre, filas in contenido.filas_por_tabla.items():
                 self.assertEqual(len(tablas[nombre].rows), len(filas) + 1 + (nombre != "detalle"))
                 esperadas = list(filas)
@@ -89,12 +102,14 @@ class TestProyectorAnexo5Docx(unittest.TestCase):
                     esperadas.append(contenido.totales_por_tabla[nombre])
                 actuales = [tuple(celda.text for celda in fila.cells) for fila in tablas[nombre].rows[1:]]
                 self.assertEqual(actuales, [tuple(str(valor) for valor in fila) for fila in esperadas])
-            self.assertEqual(len(resultado.puntos_por_grafico), 4)
-            for numero, serie in contenido.series_por_grafico.items():
-                self.assertEqual(dict(resultado.puntos_por_grafico)[numero], len(serie.categorias))
+            self.assertEqual(len(resultado.puntos_por_grafico), 3)
+            for numero, puntos in resultado.puntos_por_grafico:
+                self.assertEqual(
+                    puntos, len(contenido.series_por_grafico[numero].categorias)
+                )
 
             texto = "\n".join(p.text for p in doc.paragraphs)
-            self.assertIn("agosto 2026", texto)
+            self.assertIn("AGOSTO 2026", texto)
             self.assertIn("agosto de 2026", texto)
             self.assertNotIn("septiembre", texto.casefold())
             with ZipFile(salida) as paquete:
@@ -104,9 +119,9 @@ class TestProyectorAnexo5Docx(unittest.TestCase):
                     for nombre in paquete.namelist()
                     if nombre.endswith((".xml", ".rels"))
                 ]
-                self.assertEqual(sum(n.startswith("word/charts/chart") and n.endswith(".xml") for n in paquete.namelist()), 4)
+                self.assertEqual(sum(n.startswith("word/charts/chart") and n.endswith(".xml") for n in paquete.namelist()), 3)
                 self.assertFalse(any("septiembre 2026" in xml for xml in xml_textos))
-        self.assertEqual(hashlib.sha256(PLANTILLA.read_bytes()).hexdigest(), hash_plantilla)
+            self.assertEqual(hashlib.sha256(plantilla.read_bytes()).hexdigest(), hash_plantilla)
 
     def test_real_septiembre_incluye_las_21_areas_de_ticket_y_las_179_filas(self):
         if not EXCEL_REAL.is_file():
@@ -144,7 +159,7 @@ class TestProyectorAnexo5Docx(unittest.TestCase):
         self.assertEqual(contenido.filas_por_tabla["detalle"][0][-2:], ("(SIN ÁREA)", ""))
         self.assertIn(("Sin clasificar: Mantenimiento especial", "1", "33.3%"), contenido.filas_por_tabla["tickets_tipo"])
         self.assertIn(("(SIN ÁREA)", "1", "33.3%"), contenido.filas_por_tabla["areas"])
-        self.assertIn(("Área B", "1", "33.3%"), contenido.filas_por_tabla["areas"])
+        self.assertIn(("AREA B", "1", "33.3%"), contenido.filas_por_tabla["areas"])
         self.assertEqual(contenido.totales_por_tabla["tickets_tipo"][1], "3")
         self.assertEqual(contenido.totales_por_tabla["areas"][1], "3")
         self.assertEqual(contenido.reemplazos_texto["129 tickets"], "3 tickets")
@@ -182,8 +197,8 @@ class TestProyectorAnexo5Docx(unittest.TestCase):
             )
             doc = Document(salida)
             tablas = localizar_tablas_docx(doc)
-            self.assertEqual(len(doc.inline_shapes), 4)
-            self.assertEqual(len(doc.tables), 5)
+            self.assertEqual(len(doc.inline_shapes), 3)
+            self.assertEqual(len(doc.tables), 6)
             for titulo in ("Atenciones por Proyectos", "Tickets por Tipo de Actividad", "Tickets por Área"):
                 parrafo = next(p for p in doc.paragraphs if p.text.strip() == titulo)
                 self.assertTrue(parrafo.runs)
@@ -201,12 +216,41 @@ class TestProyectorAnexo5Docx(unittest.TestCase):
             self.assertEqual(tickets["Solicitud"], "57")
             self.assertEqual(tickets["TOTAL GENERAL"], "145")
             self.assertEqual(tablas["areas"].rows[-1].cells[1].text, "145")
+            responsables = {
+                fila.cells[0].text: fila.cells[1].text
+                for fila in tablas["responsables"].rows[1:]
+            }
+            self.assertEqual(responsables["MARCO CCANTO"], "136.50")
+            self.assertEqual(responsables["GIALINA MACHADO"], "13.75")
+            self.assertEqual(responsables["TOTAL"], "426.75")
+            tamanos_detalle = {
+                run.font.size.pt
+                for fila in tablas["detalle"].rows
+                for celda in fila.cells
+                for parrafo in celda.paragraphs
+                for run in parrafo.runs
+            }
+            self.assertEqual(tamanos_detalle, {6.0})
+            self.assertFalse(
+                any(
+                    run.font.bold
+                    for fila in tablas["detalle"].rows
+                    for celda in fila.cells
+                    for parrafo in celda.paragraphs
+                    for run in parrafo.runs
+                )
+            )
             texto = "\n".join(parrafo.text for parrafo in doc.paragraphs)
             self.assertNotIn("agosto 2026", texto)
             self.assertNotIn("agosto de 2026", texto)
             self.assertNotIn("479.5 horas", texto)
             self.assertNotIn("9 proyectos", texto)
             self.assertNotIn("129 tickets", texto)
+            self.assertNotIn("ENERO 2025", texto)
+            self.assertNotIn("enero de 2025", texto)
+            self.assertNotIn("701.00 horas", texto)
+            self.assertNotIn("431 tickets", texto)
+            self.assertNotIn("6 proyectos", texto)
             with ZipFile(salida) as paquete:
                 textos_xml = [
                     paquete.read(nombre).decode("utf-8", errors="ignore").casefold()

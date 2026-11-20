@@ -87,7 +87,10 @@ class TestLectorInformeDocxFase1(unittest.TestCase):
         self.assertEqual(stats.nombres_proyecto_distintos_exactos, ("Portal", "Portal "))
         self.assertEqual(stats.filas_sin_area, 1)
         self.assertEqual(stats.usuarios_sin_area, (("Bruno", 1),))
-        self.assertEqual(len(stats.areas_todos_los_registros), 4)
+        self.assertEqual(
+            [(f.area_original, f.total_registros) for f in stats.areas_todos_los_registros],
+            [("AREA A", 1), ("AREA B", 2), (None, 1)],
+        )
         self.assertEqual(len(stats.areas_incidencias_solicitudes), 2)
         self.assertEqual(stats.horas_totales_completas, 4.75)
         self.assertEqual(hashlib.sha256(ruta.read_bytes()).hexdigest(), antes)

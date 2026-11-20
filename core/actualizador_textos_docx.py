@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from docx.document import Document as DocumentType
+from docx.shared import Pt
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
@@ -99,6 +100,64 @@ def _reemplazar_primera_coincidencia(
             runs[indice].text = ""
         runs[fin_run].text = textos[fin_run][fin_local:]
     return True
+
+
+def filtrar_marcadores_presentes(
+    documento: DocumentType,
+    reemplazos: Mapping[str, str],
+) -> dict[str, str]:
+    """Conserva solo los marcadores que realmente aparecen en la plantilla.
+
+    Las plantillas pueden usar literales de período distintos (por ejemplo,
+    ``agosto 2026`` frente a ``ENERO 2025``). Este filtro permite entregar un
+    conjunto común de reemplazos sin exigir marcadores que no existen en la
+    plantilla seleccionada.
+    """
+
+    texto = "\n".join(parrafo.text for parrafo in iterar_parrafos(documento))
+    return {
+        marcador: valor
+        for marcador, valor in reemplazos.items()
+        if marcador and marcador in texto
+    }
+
+
+def aplicar_formato_tabla_detalle_docx(
+    documento: DocumentType,
+    *,
+    tamano_pt: float = 6,
+    negrita: bool = False,
+) -> int:
+    """Fija tamaño y negrita de todos los runs de la tabla de detalle.
+
+    Devuelve la cantidad de runs ajustados. No cambia textos, estilos de tabla,
+    bordes ni anchos de columna.
+    """
+
+    tabla = next(
+        (
+            candidata
+            for candidata in documento.tables
+            if any("DETALLE" in celda.text.upper() for celda in candidata.rows[0].cells)
+            and any("AREA_USUARIO" in celda.text.upper() for celda in candidata.rows[0].cells)
+            and any(celda.text.strip().upper() == "HORAS" for celda in candidata.rows[0].cells)
+        ),
+        None,
+    )
+    if tabla is None:
+        return 0
+    ajustados = 0
+    for fila in tabla.rows:
+        for celda in fila.cells:
+            for parrafo in celda.paragraphs:
+                runs = list(parrafo.runs)
+                if not runs and parrafo.text:
+                    runs = [parrafo.add_run("")]
+                for run in runs:
+                    run.font.size = Pt(tamano_pt)
+                    run.font.bold = negrita
+                    ajustados += 1
+    return ajustados
 
 
 def reemplazar_marcadores_docx(

@@ -4219,7 +4219,7 @@ class AplicacionTk(tk.Tk):
             return
         anio, mes = (int(parte) for parte in periodo_texto.split("-"))
         salida = cfg.REPORTES_DIR / f"Anexo5_{anio}_{mes:02d}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S_%f')}.docx"
-        plantilla = cfg.BASE_DIR / "plantillas" / "anexo_5_plantilla.docx"
+        plantilla = cfg.PLANTILLA_ANEXO5
         self._boton_generar_anexo5.configure(state="disabled")
         self._boton_abrir_anexo5.configure(state="disabled")
         self._combo_periodo_anexo5.configure(state="disabled")
