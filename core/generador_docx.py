@@ -7,12 +7,10 @@ No deriva cifras ni decide reglas sobre períodos, proyectos, áreas u horas.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-import hashlib
 import os
 from pathlib import Path
 import shutil
 import tempfile
-from typing import Any
 
 from docx import Document
 
@@ -20,12 +18,15 @@ from core.actualizador_graficos_docx import (
     ResultadoGraficosDocx,
     SerieGraficoDocx,
     actualizar_graficos_docx,
+    graficos_presentes,
 )
 from core.actualizador_tablas_docx import (
-    ENCABEZADOS_TABLA,
     actualizar_tablas_docx,
+    localizar_tablas_docx,
 )
 from core.actualizador_textos_docx import (
+    aplicar_formato_tabla_detalle_docx,
+    filtrar_marcadores_presentes,
     quitar_subrayado_titulos_graficos_docx,
     reemplazar_marcadores_docx,
 )
@@ -33,14 +34,6 @@ from core.actualizador_textos_docx import (
 
 class ErrorGeneracionDocx(ValueError):
     """La plantilla o el contenido entregado no cumple el contrato del generador."""
-
-
-def _sha256(ruta: Path) -> str:
-    digest = hashlib.sha256()
-    with ruta.open("rb") as archivo:
-        for bloque in iter(lambda: archivo.read(1024 * 1024), b""):
-            digest.update(bloque)
-    return digest.hexdigest()
 
 
 def generar_anexo5_docx(
@@ -54,9 +47,11 @@ def generar_anexo5_docx(
 ) -> ResultadoGraficosDocx:
     """Genera en una ruta nueva a partir de texto, tablas y gráficas ya resueltos.
 
-    La operación valida que se aporten las cinco tablas y los cuatro gráficos,
-    trabaja sobre una copia temporal y deja la plantilla intacta. Los textos,
-    filas, totales y series son responsabilidad de la capa de proyección.
+    La operación adapta el contenido a las tablas y gráficos que realmente
+    incluye la plantilla elegida (por ejemplo, cinco tablas y cuatro gráficos en
+    la versión anterior, o seis tablas y tres gráficos en la nueva). Trabaja
+    sobre una copia temporal y deja la plantilla intacta. Los textos, filas,
+    totales y series son responsabilidad de la capa de proyección.
     """
 
     origen = Path(plantilla).expanduser().resolve()
@@ -67,21 +62,7 @@ def generar_anexo5_docx(
         raise ErrorGeneracionDocx("La salida debe ser distinta de la plantilla original.")
     if destino.exists():
         raise FileExistsError(f"La salida ya existe y no se sobrescribirá: {destino}.")
-    if set(filas_por_tabla) != set(ENCABEZADOS_TABLA):
-        faltan = set(ENCABEZADOS_TABLA) - set(filas_por_tabla)
-        extras = set(filas_por_tabla) - set(ENCABEZADOS_TABLA)
-        detalle = []
-        if faltan:
-            detalle.append("faltan " + ", ".join(sorted(faltan)))
-        if extras:
-            detalle.append("sobran " + ", ".join(sorted(extras)))
-        raise ErrorGeneracionDocx("Se requieren exactamente las cinco tablas: " + "; ".join(detalle) + ".")
-    if set(totales_por_tabla) - set(ENCABEZADOS_TABLA):
-        raise ErrorGeneracionDocx("Hay totales para tablas desconocidas.")
-    if set(series_por_grafico) != {1, 2, 3, 4}:
-        raise ErrorGeneracionDocx("Se requieren datos para los cuatro gráficos nativos (1, 2, 3 y 4).")
 
-    hash_origen = _sha256(origen)
     destino.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporal_nombre = tempfile.mkstemp(
         prefix=".anexo5-contenido-", suffix=".docx", dir=destino.parent
@@ -90,15 +71,62 @@ def generar_anexo5_docx(
     temporal = Path(temporal_nombre)
     salida_creada = False
     try:
+        # Se trabaja siempre sobre una copia. Además de proteger la plantilla,
+        # permite generar aunque Word tenga abierto el archivo original (Windows
+        # bloquea la lectura directa, pero no la copia).
+        firma_origen = (origen.stat().st_mtime_ns, origen.stat().st_size)
         shutil.copy2(origen, temporal)
         documento = Document(temporal)
-        reemplazar_marcadores_docx(documento, reemplazos_texto, exigir_todos=True)
+
+        tablas_plantilla = set(localizar_tablas_docx(documento))
+        faltan_tablas = tablas_plantilla - set(filas_por_tabla)
+        if faltan_tablas:
+            raise ErrorGeneracionDocx(
+                "Faltan datos para las tablas de la plantilla: "
+                + ", ".join(sorted(faltan_tablas))
+                + "."
+            )
+        filas_efectivas = {
+            nombre: filas
+            for nombre, filas in filas_por_tabla.items()
+            if nombre in tablas_plantilla
+        }
+        totales_efectivos = {
+            nombre: total
+            for nombre, total in totales_por_tabla.items()
+            if nombre in tablas_plantilla
+        }
+        totales_sin_filas = set(totales_efectivos) - set(filas_efectivas)
+        if totales_sin_filas:
+            raise ErrorGeneracionDocx(
+                "Hay totales sin filas de datos para: "
+                + ", ".join(sorted(totales_sin_filas))
+                + "."
+            )
+
+        graficos_plantilla = graficos_presentes(temporal)
+        faltan_series = set(graficos_plantilla) - set(series_por_grafico)
+        if faltan_series:
+            raise ErrorGeneracionDocx(
+                "Faltan series para los gráficos de la plantilla: "
+                + ", ".join(str(numero) for numero in sorted(faltan_series))
+                + "."
+            )
+        series_efectivas = {
+            numero: series_por_grafico[numero] for numero in graficos_plantilla
+        }
+        reemplazos_efectivos = filtrar_marcadores_presentes(
+            documento, reemplazos_texto
+        )
+
+        reemplazar_marcadores_docx(documento, reemplazos_efectivos, exigir_todos=True)
         quitar_subrayado_titulos_graficos_docx(documento)
-        actualizar_tablas_docx(documento, filas_por_tabla, totales_por_tabla)
+        actualizar_tablas_docx(documento, filas_efectivas, totales_efectivos)
+        aplicar_formato_tabla_detalle_docx(documento, tamano_pt=6, negrita=False)
         documento.save(temporal)
-        resultado = actualizar_graficos_docx(temporal, destino, series_por_grafico)
+        resultado = actualizar_graficos_docx(temporal, destino, series_efectivas)
         salida_creada = True
-        if _sha256(origen) != hash_origen:
+        if (origen.stat().st_mtime_ns, origen.stat().st_size) != firma_origen:
             destino.unlink(missing_ok=True)
             salida_creada = False
             raise ErrorGeneracionDocx("La plantilla oficial cambió durante la generación.")

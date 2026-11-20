@@ -9,6 +9,7 @@ from io import BytesIO
 import os
 from pathlib import Path
 import posixpath
+import re
 import tempfile
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -30,6 +31,7 @@ _GRAFICOS = {
     3: ("ACTIVIDAD", "TICKETS"),
     4: ("AREA", "TICKETS"),
 }
+_PATRON_GRAFICO = re.compile(r"^word/charts/chart(?P<numero>\d+)\.xml$")
 
 
 class ErrorGraficosDocx(ValueError):
@@ -48,6 +50,22 @@ class ResultadoGraficosDocx:
     ruta_salida: Path
     puntos_por_grafico: tuple[tuple[int, int], ...]
     libros_incrustados: tuple[str, ...]
+
+
+def graficos_presentes(ruta: str | Path) -> tuple[int, ...]:
+    """Números de los gráficos nativos incluidos en el paquete DOCX.
+
+    Permite aceptar plantillas con tres o cuatro gráficos sin exigir siempre
+    el gráfico de áreas.
+    """
+
+    with ZipFile(Path(ruta), "r") as paquete:
+        numeros = sorted(
+            int(coincidencia.group("numero"))
+            for nombre in paquete.namelist()
+            if (coincidencia := _PATRON_GRAFICO.match(nombre))
+        )
+    return tuple(numeros)
 
 
 def _sha256(ruta: Path) -> str:
@@ -209,8 +227,10 @@ def _validar_salida(ruta: Path, series: Mapping[int, SerieGraficoDocx]) -> tuple
             finally:
                 libro.close()
     documento = Document(ruta)
-    if len(documento.inline_shapes) != 4:
-        raise ErrorGraficosDocx("La copia generada no conserva los cuatro gráficos inline.")
+    if len(documento.inline_shapes) != len(series):
+        raise ErrorGraficosDocx(
+            "La copia generada no conserva todos los gráficos inline esperados."
+        )
     return tuple(nombres_libros)
 
 
@@ -233,8 +253,32 @@ def actualizar_graficos_docx(
         raise ErrorGraficosDocx(f"No existe el DOCX de entrada: {entrada}.")
     if salida.exists():
         raise FileExistsError(f"La salida ya existe y no se sobrescribirá: {salida}.")
-    if set(series_por_grafico) != set(_GRAFICOS):
-        raise ErrorGraficosDocx("Se requieren datos para los cuatro gráficos (1, 2, 3 y 4).")
+    presentes = graficos_presentes(entrada)
+    if not presentes:
+        raise ErrorGraficosDocx("El DOCX de entrada no contiene gráficos nativos.")
+    desconocidos = set(presentes) - set(_GRAFICOS)
+    if desconocidos:
+        raise ErrorGraficosDocx(
+            "El DOCX contiene gráficos no soportados: "
+            + ", ".join(str(numero) for numero in sorted(desconocidos))
+        )
+    if set(series_por_grafico) != set(presentes):
+        faltan = set(presentes) - set(series_por_grafico)
+        sobran = set(series_por_grafico) - set(presentes)
+        detalle = []
+        if faltan:
+            detalle.append(
+                "faltan " + ", ".join(str(numero) for numero in sorted(faltan))
+            )
+        if sobran:
+            detalle.append(
+                "sobran " + ", ".join(str(numero) for numero in sorted(sobran))
+            )
+        raise ErrorGraficosDocx(
+            "Los gráficos deben coincidir con los de la plantilla: "
+            + "; ".join(detalle)
+            + "."
+        )
     for numero, serie in series_por_grafico.items():
         if len(serie.categorias) != len(serie.valores):
             raise ErrorGraficosDocx(f"chart{numero}: hay distinto número de categorías y valores.")

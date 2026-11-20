@@ -36,6 +36,10 @@ REVISION_DIR = BASE_DIR / DEFAULT_CONFIG["revision_dir"]
 LOGS_DIR = BASE_DIR / DEFAULT_CONFIG["logs_dir"]
 REPORTES_DIR = BASE_DIR / DEFAULT_CONFIG["reportes_dir"]
 
+# Plantilla oficial vigente del Anexo 5. La nueva versión incluye la tabla de
+# responsables y omite el gráfico de áreas.
+PLANTILLA_ANEXO5 = BASE_DIR / "plantillas" / "Anexo5_año_mes.docx"
+
 # Base de correspondencias USUARIO -> AREA_USUARIO (gestión de usuarios/áreas).
 MAESTRO_XLSX = DATA_DIR / "maestro_areas.xlsx"
 MAESTRO_CSV = DATA_DIR / "maestro_areas.csv"

@@ -54,6 +54,7 @@ class RegistroInforme:
     fecha: date | None
     solicitante_original: Any
     area_original: Any
+    responsable_original: Any
     atencion_original: Any
     proyecto_original: Any
     horas_original: Any

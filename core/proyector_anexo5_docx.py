@@ -13,6 +13,7 @@ from typing import Mapping, Sequence
 from core.actualizador_graficos_docx import SerieGraficoDocx
 from core.estadisticas_informe_docx import area_canonica_informe
 from core.lector_informe_docx import _vacio
+from core.normalizador import normalizar_usuario
 from core.modelo_informe_docx import (
     DatosInforme,
     EstadisticasInforme,
@@ -27,6 +28,7 @@ _MESES = (
 )
 _ETIQUETAS_ACTIVIDAD = {"Incidencia": "Incidencias", "Solicitud": "Solicitud"}
 _ETIQUETA_AREA_VACIA = "(SIN ÁREA)"
+_ETIQUETA_RESPONSABLE_VACIO = "(SIN RESPONSABLE)"
 
 
 @dataclass(frozen=True)
@@ -125,6 +127,45 @@ def preparar_contenido_anexo5(
         cats_grafico_horas.append(etiqueta)
         vals_grafico_horas.append(horas)
 
+    # Horas por responsable: se agrupan todas las atenciones del período
+    # (incluidas las de proyecto) con la misma clave normalizada de la columna
+    # Responsable. No lleva gráfico ni título propio en la plantilla nueva.
+    horas_por_responsable: dict[str, Decimal] = {}
+    filas_sin_horas_por_responsable: dict[str, int] = {}
+    for registro in incluidos:
+        responsable = (
+            normalizar_usuario(registro.responsable_original)
+            or _ETIQUETA_RESPONSABLE_VACIO
+        )
+        horas = registro.horas if registro.horas is not None else Decimal("0")
+        horas_por_responsable[responsable] = (
+            horas_por_responsable.get(responsable, Decimal("0")) + horas
+        )
+        if registro.horas is None:
+            filas_sin_horas_por_responsable[responsable] = (
+                filas_sin_horas_por_responsable.get(responsable, 0) + 1
+            )
+
+    filas_responsables = []
+    for responsable, horas in sorted(
+        horas_por_responsable.items(),
+        key=lambda item: (
+            -item[1],
+            item[0] == _ETIQUETA_RESPONSABLE_VACIO,
+            item[0],
+        ),
+    ):
+        valor_visible = _numero(horas)
+        if filas_sin_horas_por_responsable.get(responsable):
+            valor_visible += " (parcial)"
+        filas_responsables.append(
+            (
+                responsable,
+                valor_visible,
+                _porcentaje(horas, total_horas_conocidas),
+            )
+        )
+
     grupos_proyecto = [
         (nombre, horas, cantidad, sin_horas)
         for nombre, horas, cantidad, sin_horas in estadisticas.horas_y_filas_por_proyecto_exacto
@@ -169,12 +210,23 @@ def preparar_contenido_anexo5(
         horas_resumen += " horas (suma parcial; revisar horas vacías o inválidas)"
     else:
         horas_resumen += " horas"
+    periodo_largo = f"{_MESES[mes - 1]} de {anio}"
+    proyectos_texto = f"{proyectos_distintos} proyectos"
+    tickets_texto = f"{total_ticket_rows} tickets"
     reemplazos = {
+        # Literales de la plantilla anterior.
         "agosto 2026": periodo_texto,
-        "agosto de 2026": f"{_MESES[mes - 1]} de {anio}",
+        "agosto de 2026": periodo_largo,
         "479.5 horas": horas_resumen,
-        "9 proyectos": f"{proyectos_distintos} proyectos",
-        "129 tickets": f"{total_ticket_rows} tickets",
+        "9 proyectos": proyectos_texto,
+        "129 tickets": tickets_texto,
+        # Literales de la plantilla nueva (Anexo5_año_mes.docx). El generador
+        # conserva solo los que existan en la plantilla elegida.
+        "ENERO 2025": f"{_MESES[mes - 1].upper()} {anio}",
+        "enero de 2025": periodo_largo,
+        "701.00 horas": horas_resumen,
+        "6 proyectos": proyectos_texto,
+        "431 tickets": tickets_texto,
     }
 
     total_horas_visible = _numero(total_horas_conocidas)
@@ -212,6 +264,7 @@ def preparar_contenido_anexo5(
         reemplazos_texto=reemplazos,
         filas_por_tabla={
             "resumen_tipo_atencion": filas_tipo_horas,
+            "responsables": filas_responsables,
             "proyectos": filas_proyectos,
             "tickets_tipo": filas_tipo_actividad,
             "areas": filas_areas,
@@ -219,6 +272,11 @@ def preparar_contenido_anexo5(
         },
         totales_por_tabla={
             "resumen_tipo_atencion": (etiqueta_total_horas, total_horas_visible, "100%"),
+            "responsables": (
+                etiqueta_total_horas,
+                total_horas_visible,
+                "100%" if total_horas_conocidas else "0.0%",
+            ),
             "proyectos": (etiqueta_total_proyectos, total_horas_proyectos_visible, "100%" if total_horas_proyectos else "0.0%"),
             "tickets_tipo": ("TOTAL GENERAL", str(total_ticket_rows), "100%" if total_ticket_rows else "0.0%"),
             "areas": ("TOTAL GENERAL", str(total_areas), "100%" if total_areas else "0.0%"),
