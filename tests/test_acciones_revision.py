@@ -279,5 +279,96 @@ class PruebasAsignacionMasiva(unittest.TestCase):
         mb.showwarning.assert_called_once()
 
 
+class PruebasGuardarAreasEnData(unittest.TestCase):
+    def _ventana(self, registros):
+        from ventana_validacion import VentanaValidacion
+
+        ventana = VentanaValidacion.__new__(VentanaValidacion)
+        ventana.revision = SimpleNamespace(
+            registros=registros,
+            guardar=mock.MagicMock(),
+        )
+        ventana._refrescar = mock.MagicMock()
+        ventana._var_resumen = SimpleNamespace(set=mock.MagicMock())
+        ventana._al_guardar_datos = mock.MagicMock(
+            return_value={
+                "guardadas": 2,
+                "nuevas": 1,
+                "actualizadas": 1,
+                "sin_cambios": 0,
+                "fallidas": [],
+                "ruta": "data/maestro_areas.xlsx",
+            }
+        )
+        return ventana
+
+    @mock.patch("ventana_validacion.messagebox")
+    def test_guarda_areas_sin_generar_excel(self, mb) -> None:
+        mb.askyesno.return_value = True
+        ventana = self._ventana(
+            [
+                {"usuario": "ANA", "area_actual": "SISTEMAS"},
+                {"usuario": "LUIS", "area_actual": "CONTABILIDAD"},
+                {"usuario": "SIN AREA", "area_actual": ""},
+            ]
+        )
+
+        ventana._guardar_areas_en_data()
+
+        ventana._al_guardar_datos.assert_called_once()
+        enviados = ventana._al_guardar_datos.call_args[0][0]
+        self.assertEqual(
+            [item["usuario"] for item in enviados], ["ANA", "LUIS"]
+        )
+        ventana.revision.guardar.assert_called_once()
+        ventana._refrescar.assert_called_once()
+        mb.showinfo.assert_called_once()
+        mensaje = ventana._var_resumen.set.call_args[0][0]
+        self.assertIn("Áreas guardadas en data: 2", mensaje)
+        self.assertIn("omitidos sin área: 1", mensaje)
+
+    @mock.patch("ventana_validacion.messagebox")
+    def test_sin_areas_no_llama_al_guardado(self, mb) -> None:
+        ventana = self._ventana(
+            [{"usuario": "ANA", "area_actual": ""}]
+        )
+
+        ventana._guardar_areas_en_data()
+
+        ventana._al_guardar_datos.assert_not_called()
+        mb.showinfo.assert_called_once()
+
+    @mock.patch("ventana_validacion.messagebox")
+    def test_cancelar_confirmacion_no_guarda(self, mb) -> None:
+        mb.askyesno.return_value = False
+        ventana = self._ventana(
+            [{"usuario": "ANA", "area_actual": "SISTEMAS"}]
+        )
+
+        ventana._guardar_areas_en_data()
+
+        ventana._al_guardar_datos.assert_not_called()
+        ventana.revision.guardar.assert_not_called()
+
+    @mock.patch("ventana_validacion.messagebox")
+    def test_sin_callback_usa_la_asignacion_individual(self, mb) -> None:
+        mb.askyesno.return_value = True
+        ventana = self._ventana(
+            [
+                {"usuario": "ANA", "area_actual": "SISTEMAS"},
+                {"usuario": "LUIS", "area_actual": "CONTABILIDAD"},
+            ]
+        )
+        ventana._al_guardar_datos = None
+        ventana._asignar_en_maestro = mock.MagicMock(return_value=True)
+
+        ventana._guardar_areas_en_data()
+
+        self.assertEqual(ventana._asignar_en_maestro.call_count, 2)
+        ventana.revision.guardar.assert_called_once()
+        mensaje = ventana._var_resumen.set.call_args[0][0]
+        self.assertIn("Áreas guardadas en data: 2", mensaje)
+
+
 if __name__ == "__main__":
     unittest.main()

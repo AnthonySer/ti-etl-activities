@@ -2246,6 +2246,7 @@ class AplicacionTk(tk.Tk):
                 al_generar=lambda modo, permitir: self._generar_desde_validacion(
                     modo, permitir, self._ventana_validacion
                 ),
+                al_guardar_datos=self._guardar_areas_revision_en_data,
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("No se pudo abrir la ventana de validación")
@@ -2319,6 +2320,152 @@ class AplicacionTk(tk.Tk):
             f"Asignación guardada: {usuario} → {area_final} ({origen})"
         )
         return True
+
+    def _guardar_areas_revision_en_data(
+        self, registros: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Guarda en ``data/maestro_areas.xlsx`` las áreas de la revisión.
+
+        No procesa ni genera ningún Excel de tickets. Se escribe una sola vez
+        el maestro para todo el lote.
+        """
+
+        destino = str(cfg.MAESTRO_XLSX)
+        vacio: dict[str, Any] = {
+            "guardadas": 0,
+            "nuevas": 0,
+            "actualizadas": 0,
+            "sin_cambios": 0,
+            "fallidas": [],
+            "ruta": destino,
+        }
+        asignaciones = [
+            {
+                "usuario": str(item.get("usuario") or "").strip(),
+                "area": str(item.get("area") or "").strip(),
+            }
+            for item in registros
+            if str(item.get("usuario") or "").strip()
+            and str(item.get("area") or "").strip()
+        ]
+        if not asignaciones:
+            return {**vacio, "error": "No hay áreas asignadas para guardar."}
+
+        # Nunca se guarda con un maestro vacío: si la carga inicial no terminó,
+        # se carga ahora mismo desde disco.
+        if not self._maestro_listo:
+            try:
+                with bloqueo("carga del maestro antes de guardar áreas"):
+                    self._maestro = svc_asignaciones.cargar_maestro()
+                    self._maestro_listo = True
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.exception("No se pudo cargar el maestro de áreas")
+                return {
+                    **vacio,
+                    "error": f"No se pudo cargar el maestro de áreas: {exc}",
+                }
+
+        try:
+            with bloqueo("guardado de áreas de la revisión"):
+                resultado = svc_asignaciones.asignar(
+                    self._maestro,
+                    asignaciones,
+                    guardar=True,
+                    usuario_ejecutor=os.getenv("USERNAME", ""),
+                )
+        except ErrorCambioExterno as exc:
+            if not messagebox.askyesno(
+                "El maestro cambió en disco",
+                f"{exc}\n\n¿Desea recargar el Excel maestro y guardar las "
+                "áreas de la revisión conservando los demás cambios?",
+            ):
+                return {
+                    **vacio,
+                    "error": (
+                        "Guardado cancelado: el Excel maestro cambió en disco."
+                    ),
+                }
+            try:
+                with bloqueo("recarga y guardado de áreas de la revisión"):
+                    maestro_actual = svc_asignaciones.Maestro.cargar(
+                        cfg.MAESTRO_XLSX,
+                        cfg.MAESTRO_CSV,
+                        verificar_consistencia=False,
+                    )
+                    conflictos = [
+                        (
+                            item["usuario"],
+                            maestro_actual.buscar(item["usuario"]) or "",
+                            item["area"],
+                        )
+                        for item in asignaciones
+                        if (maestro_actual.buscar(item["usuario"]) or "")
+                    ]
+                    if conflictos:
+                        muestra = "\n".join(
+                            f"{usuario}: '{actual}' → '{nueva}'"
+                            for usuario, actual, nueva in conflictos[:15]
+                        )
+                        restantes = len(conflictos) - 15
+                        if restantes > 0:
+                            muestra += f"\n… y {restantes} más."
+                        if not messagebox.askyesno(
+                            "Áreas distintas en el Excel actualizado",
+                            "El Excel recargado ya tiene áreas para algunos "
+                            f"usuarios:\n\n{muestra}\n\n"
+                            "¿Desea reemplazarlas con las áreas de la revisión?",
+                        ):
+                            return {
+                                **vacio,
+                                "error": (
+                                    "Guardado cancelado: hay áreas distintas en "
+                                    "el Excel actualizado."
+                                ),
+                            }
+                    huellas = RegistroHuellas()
+                    huellas.guardar(cfg.MAESTRO_XLSX)
+                    resultado = svc_asignaciones.asignar(
+                        maestro_actual,
+                        asignaciones,
+                        guardar=True,
+                        usuario_ejecutor=os.getenv("USERNAME", ""),
+                        confirmar_cambio_externo=True,
+                        registro=huellas,
+                    )
+                    self._maestro.reemplazar_con(maestro_actual)
+            except Exception as reintento_exc:  # noqa: BLE001
+                LOGGER.exception(
+                    "No se pudieron guardar las áreas tras recargar el maestro"
+                )
+                return {**vacio, "error": str(reintento_exc)}
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception(
+                "No se pudieron guardar las áreas de la revisión en data"
+            )
+            return {**vacio, "error": str(exc)}
+
+        self._maestro_listo = True
+        try:
+            self._refrescar_usuarios()
+            self._refrescar_pendientes()
+            self._refrescar_panel()
+            self._refrescar_auditoria()
+        except Exception:  # noqa: BLE001 - el guardado ya se completó
+            LOGGER.exception(
+                "No se pudieron refrescar las vistas tras guardar las áreas"
+            )
+
+        nuevas = resultado.registradas
+        actualizadas = resultado.actualizadas
+        sin_cambios = resultado.sin_cambios
+        return {
+            "guardadas": nuevas + actualizadas + sin_cambios,
+            "nuevas": nuevas,
+            "actualizadas": actualizadas,
+            "sin_cambios": sin_cambios,
+            "fallidas": [],
+            "ruta": destino,
+        }
 
     def _reanudar_revision(self) -> None:
         from core import revision as svc_revision

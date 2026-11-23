@@ -342,6 +342,8 @@ class VentanaValidacion(tk.Toplevel):
         *,
         al_asignar: Callable[[str, str, str], None] | None = None,
         al_generar: Callable[[str, bool], Any] | None = None,
+        al_guardar_datos: Callable[[list[dict[str, Any]]], dict[str, Any] | None]
+        | None = None,
     ) -> None:
         super().__init__(padre)
         self.title("Validación de Usuarios y Áreas")
@@ -355,6 +357,7 @@ class VentanaValidacion(tk.Toplevel):
         self.maestro = maestro or Maestro()
         self._al_asignar = al_asignar
         self._al_generar = al_generar
+        self._al_guardar_datos = al_guardar_datos
         self._ocupado = False
         self._generando = False
         self._iids: dict[str, dict[str, Any]] = {}
@@ -659,6 +662,13 @@ class VentanaValidacion(tk.Toplevel):
         ttk.Button(
             izquierda, text="Validar seleccionados", command=self._validar_seleccionados
         ).pack(side="left", padx=6)
+        self._btn_guardar_data = ttk.Button(
+            izquierda,
+            text="Guardar áreas en data",
+            command=self._guardar_areas_en_data,
+        )
+        self._btn_guardar_data.pack(side="left", padx=6)
+
         derecha = ttk.Frame(marco)
         derecha.pack(side="right")
         ttk.Label(derecha, text="Formato:").pack(side="left")
@@ -1900,6 +1910,138 @@ class VentanaValidacion(tk.Toplevel):
         if resumen.get("ya_validados"):
             mensaje += f". Ya validados: {resumen['ya_validados']}"
         self._var_resumen.set(mensaje)
+
+    def _guardar_areas_en_data(self) -> None:
+        """Persiste las áreas de la revisión en data sin generar los Excel."""
+
+        registros: list[dict[str, Any]] = []
+        vistos: set[str] = set()
+        sin_area = 0
+        for registro in self.revision.registros:
+            usuario = str(registro.get("usuario") or "").strip()
+            area = str(registro.get("area_actual") or "").strip()
+            if not usuario:
+                continue
+            if not area:
+                sin_area += 1
+                continue
+            clave = normalizar_nombre(usuario) or usuario.casefold()
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+            registros.append({"usuario": usuario, "area": area})
+
+        if not registros:
+            messagebox.showinfo(
+                "Sin áreas para guardar",
+                "Todavía no hay áreas asignadas en esta revisión. Asigne un "
+                "área antes de guardar en data.",
+                parent=self,
+            )
+            return
+
+        destino = str(cfg.MAESTRO_XLSX)
+        if not messagebox.askyesno(
+            "Guardar áreas en data",
+            f"Se guardarán {len(registros)} área(s) en:\n{destino}\n\n"
+            "Esta acción NO genera ni modifica el Excel de tickets; solo "
+            "actualiza la base persistente de usuarios y áreas.\n\n"
+            "¿Desea continuar?",
+            parent=self,
+        ):
+            return
+
+        resultado: dict[str, Any] | None
+        if self._al_guardar_datos is not None:
+            try:
+                resultado = self._al_guardar_datos(registros)
+            except Exception as exc:  # noqa: BLE001 - se informa sin cerrar
+                LOGGER.exception("No se pudieron guardar las áreas en data")
+                messagebox.showerror(
+                    "No se pudo guardar en data",
+                    f"Las áreas no se guardaron: {exc}",
+                    parent=self,
+                )
+                return
+        else:
+            guardadas = 0
+            fallidas: list[str] = []
+            for item in registros:
+                if self._asignar_en_maestro(
+                    item["usuario"], item["area"], procedencia.MANUAL
+                ):
+                    guardadas += 1
+                else:
+                    fallidas.append(item["usuario"])
+            resultado = {
+                "guardadas": guardadas,
+                "sin_cambios": 0,
+                "fallidas": fallidas,
+                "ruta": destino,
+            }
+
+        if not resultado:
+            messagebox.showinfo(
+                "Guardado no realizado",
+                "No se guardó ningún cambio en data.",
+                parent=self,
+            )
+            return
+
+        error = str(resultado.get("error") or "").strip()
+        if error:
+            messagebox.showerror(
+                "No se pudo guardar en data", error, parent=self
+            )
+            return
+
+        guardadas = int(resultado.get("guardadas") or 0)
+        nuevas = int(resultado.get("nuevas") or 0)
+        actualizadas = int(resultado.get("actualizadas") or 0)
+        sin_cambios = int(resultado.get("sin_cambios") or 0)
+        fallidas = [str(usuario) for usuario in (resultado.get("fallidas") or [])]
+        ruta = str(resultado.get("ruta") or destino)
+
+        try:
+            self.revision.guardar()
+        except Exception as exc:  # noqa: BLE001 - data ya se guardó
+            LOGGER.error(
+                "Las áreas se guardaron en data, pero no se pudo guardar la "
+                "revisión: %s",
+                exc,
+            )
+        self._refrescar()
+
+        partes = [f"Áreas guardadas en data: {guardadas}"]
+        detalle = []
+        if nuevas:
+            detalle.append(f"nuevas: {nuevas}")
+        if actualizadas:
+            detalle.append(f"actualizadas: {actualizadas}")
+        if sin_cambios:
+            detalle.append(f"sin cambios: {sin_cambios}")
+        if detalle:
+            partes.append("(" + ", ".join(detalle) + ")")
+        if sin_area:
+            partes.append(f"omitidos sin área: {sin_area}")
+        if fallidas:
+            partes.append(f"fallidos: {len(fallidas)}")
+        mensaje = ". ".join(partes) + f". Archivo: {ruta}"
+        self._var_resumen.set(mensaje)
+
+        if fallidas:
+            messagebox.showwarning(
+                "Guardado parcial en data",
+                mensaje + "\n\nRevise los registros no guardados.",
+                parent=self,
+            )
+        else:
+            messagebox.showinfo(
+                "Áreas guardadas en data",
+                mensaje
+                + "\n\nEl Excel de tickets no fue generado ni modificado.",
+                parent=self,
+            )
 
     def _ver_detalles(self) -> None:
         registro = self._un_registro()
