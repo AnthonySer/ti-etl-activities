@@ -369,6 +369,7 @@ class VentanaValidacion(tk.Toplevel):
         self._var_modo = tk.StringVar(value="Excel normal")
         self._var_resumen = tk.StringVar(value="")
         self._var_conexion = tk.StringVar(value="")
+        self._var_seleccion = tk.StringVar(value="0 de 0 seleccionados")
 
         self._construir_cabecera()
         self._construir_kpis()
@@ -540,6 +541,29 @@ class VentanaValidacion(tk.Toplevel):
         self._refrescar()
 
     def _construir_tabla(self) -> None:
+        barra_seleccion = ttk.Frame(self)
+        barra_seleccion.pack(fill="x", padx=18, pady=(4, 0))
+        ttk.Button(
+            barra_seleccion,
+            text="Seleccionar todos",
+            command=self._seleccionar_todos,
+        ).pack(side="left")
+        ttk.Button(
+            barra_seleccion,
+            text="Limpiar selección",
+            command=self._limpiar_seleccion,
+        ).pack(side="left", padx=(6, 0))
+        ttk.Label(
+            barra_seleccion,
+            textvariable=self._var_seleccion,
+            style="Subtitulo.TLabel",
+        ).pack(side="left", padx=(12, 0))
+        ttk.Label(
+            barra_seleccion,
+            text="(Ctrl+A selecciona todas las filas visibles)",
+            style="Subtitulo.TLabel",
+        ).pack(side="right")
+
         marco = ttk.LabelFrame(
             self, text="Registros que necesitan revisión", padding=6
         )
@@ -597,6 +621,9 @@ class VentanaValidacion(tk.Toplevel):
         self._tabla.bind("<Double-1>", self._doble_clic)
         self._tabla.bind("<Button-1>", self._clic_acciones)
         self._tabla.bind("<Button-3>", self._mostrar_menu)
+        self._tabla.bind("<<TreeviewSelect>>", self._al_cambiar_seleccion)
+        self._tabla.bind("<Control-a>", self._atajo_seleccionar_todos)
+        self._tabla.bind("<Control-A>", self._atajo_seleccionar_todos)
         self._menu = tk.Menu(self, tearoff=0)
 
     def _construir_acciones(self) -> None:
@@ -619,9 +646,10 @@ class VentanaValidacion(tk.Toplevel):
             text="Buscar otro nombre…",
             command=self._buscar_otro_nombre,
         ).pack(side="left", padx=(6, 0))
-        ttk.Button(
+        self._btn_asignar = ttk.Button(
             izquierda, text="Asignar área", command=self._asignar_area
-        ).pack(side="left", padx=6)
+        )
+        self._btn_asignar.pack(side="left", padx=6)
         ttk.Button(
             izquierda, text="Revisar coincidencias", command=self._revisar_coincidencias
         ).pack(side="left", padx=6)
@@ -631,7 +659,6 @@ class VentanaValidacion(tk.Toplevel):
         ttk.Button(
             izquierda, text="Validar seleccionados", command=self._validar_seleccionados
         ).pack(side="left", padx=6)
-
         derecha = ttk.Frame(marco)
         derecha.pack(side="right")
         ttk.Label(derecha, text="Formato:").pack(side="left")
@@ -661,8 +688,9 @@ class VentanaValidacion(tk.Toplevel):
         ).pack(side="left")
 
         self._var_resumen.set(
-            "Seleccione una o varias filas. También puede usar clic derecho "
-            "para las acciones por fila."
+            "Seleccione una o varias filas. Use «Seleccionar todos» para "
+            "asignar un área de forma masiva o clic derecho para las acciones "
+            "por fila."
         )
         ttk.Label(
             self,
@@ -840,6 +868,7 @@ class VentanaValidacion(tk.Toplevel):
                 return
             self._pintado_tabla_after_id = None
             self._actualizar_kpis(config, resumen)
+            self._actualizar_seleccion()
             LOGGER.info(
                 "Rendimiento tabla_validacion: actualizacion_visual=%.3fs procesados=%s mostrados=%s",
                 time.perf_counter() - inicio_visual, resumen["total_usuarios"], len(registros),
@@ -885,6 +914,57 @@ class VentanaValidacion(tk.Toplevel):
             for iid in self._tabla.selection()
             if iid in self._iids
         ]
+
+    def _seleccionar_todos(self) -> None:
+        """Selecciona todas las filas visibles para operaciones masivas."""
+
+        filas = self._tabla.get_children()
+        if not filas:
+            self._var_resumen.set(
+                "No hay registros visibles para seleccionar. Ajuste los filtros."
+            )
+            return
+        self._tabla.selection_set(*filas)
+        self._tabla.focus(filas[0])
+        self._actualizar_seleccion()
+        self._var_resumen.set(
+            f"{len(filas)} registros seleccionados. Use «Asignar área» para "
+            "aplicar una asignación masiva."
+        )
+
+    def _limpiar_seleccion(self) -> None:
+        seleccion = self._tabla.selection()
+        if seleccion:
+            self._tabla.selection_remove(*seleccion)
+        self._actualizar_seleccion()
+
+    def _atajo_seleccionar_todos(self, _evento: Any = None) -> str:
+        self._seleccionar_todos()
+        return "break"
+
+    def _al_cambiar_seleccion(self, _evento: Any = None) -> None:
+        self._actualizar_seleccion()
+
+    def _actualizar_seleccion(self) -> None:
+        if not hasattr(self, "_var_seleccion"):
+            return
+        cantidad = len(self._tabla.selection())
+        total = len(self._tabla.get_children())
+        self._var_seleccion.set(
+            f"{cantidad} de {total} seleccionados"
+        )
+        boton = getattr(self, "_btn_asignar", None)
+        if boton is not None:
+            try:
+                boton.configure(
+                    text=(
+                        "Asignar área (masiva)"
+                        if cantidad > 1
+                        else "Asignar área"
+                    )
+                )
+            except tk.TclError:
+                pass
 
     def _un_registro(self) -> dict[str, Any] | None:
         seleccionados = self._seleccionados()
@@ -1354,14 +1434,30 @@ class VentanaValidacion(tk.Toplevel):
         return True
 
     def _asignar_area(self) -> None:
-        registro = self._un_registro()
-        if registro is None:
+        registros = self._seleccionados()
+        if not registros:
+            messagebox.showinfo(
+                "Sin selección",
+                "Seleccione uno o varios registros para asignar un área.",
+            )
+            return
+        if len(registros) == 1:
+            registro = registros[0]
+            VentanaAsignarArea(
+                self,
+                usuario=str(registro.get("usuario") or ""),
+                areas=self._areas_disponibles(),
+                al_guardar=lambda area: self._aplicar_asignacion(registro, area),
+            )
             return
         VentanaAsignarArea(
             self,
-            usuario=str(registro.get("usuario") or ""),
+            usuario=f"{len(registros)} registros seleccionados",
+            etiqueta=f"Asignación masiva: {len(registros)} registros",
             areas=self._areas_disponibles(),
-            al_guardar=lambda area: self._aplicar_asignacion(registro, area),
+            al_guardar=lambda area: self._aplicar_asignacion_masiva(
+                registros, area
+            ),
         )
 
     def _crear_area_desde_coincidencia(
@@ -1491,6 +1587,72 @@ class VentanaValidacion(tk.Toplevel):
         self._var_resumen.set(
             f"{registro.get('usuario')}: área asignada manualmente → {area}"
         )
+
+    def _aplicar_asignacion_masiva(
+        self, registros: Iterable[dict[str, Any]], area: str
+    ) -> None:
+        """Asigna la misma área a todos los registros seleccionados."""
+
+        area = str(area or "").strip()
+        registros = list(registros)
+        if not area:
+            messagebox.showwarning("Área vacía", "Indique un área válida.")
+            return
+        if not registros:
+            messagebox.showinfo(
+                "Sin selección", "No hay registros para asignar."
+            )
+            return
+        total = len(registros)
+        if not messagebox.askyesno(
+            "Confirmar asignación masiva",
+            f"Se asignará el área '{area}' a {total} registro(s).\n\n"
+            "La operación actualizará el Excel maestro y la revisión actual.\n\n"
+            "¿Desea continuar?",
+            parent=self,
+        ):
+            return
+
+        asignados = 0
+        fallidos: list[str] = []
+        for registro in registros:
+            usuario = str(registro.get("usuario") or "").strip()
+            if not usuario:
+                continue
+            if not self._asignar_en_maestro(usuario, area, procedencia.MANUAL):
+                fallidos.append(usuario)
+                continue
+            try:
+                self.revision.asignar_manual(usuario, area)
+            except Exception as exc:  # noqa: BLE001 - un registro no detiene el lote
+                LOGGER.error(
+                    "No se pudo actualizar la revisión para %s: %s", usuario, exc
+                )
+                fallidos.append(usuario)
+                continue
+            asignados += 1
+
+        if not asignados:
+            self._var_resumen.set(
+                f"Asignación masiva sin cambios: no se pudo asignar '{area}'."
+            )
+            return
+
+        self.revision.guardar()
+        self._refrescar()
+        mensaje = (
+            f"Asignación masiva: {asignados} de {total} registros → {area}"
+        )
+        if fallidos:
+            mensaje += f". No asignados: {len(fallidos)}"
+        self._var_resumen.set(mensaje)
+        if fallidos:
+            messagebox.showwarning(
+                "Asignación masiva parcial",
+                f"{mensaje}.\n\nRevise los registros no asignados antes de "
+                "continuar.",
+                parent=self,
+            )
 
     def _asignar_en_maestro(
         self,
@@ -2111,9 +2273,10 @@ class VentanaAsignarArea(tk.Toplevel):
         areas: Iterable[str],
         al_guardar: Callable[[str], None],
         area_inicial: str = "",
+        etiqueta: str | None = None,
     ) -> None:
         super().__init__(padre)
-        self.title("Asignar o agregar área")
+        self.title(etiqueta or "Asignar o agregar área")
         self.geometry("560x280")
         self.minsize(480, 250)
         self.configure(bg=FONDO)
@@ -2124,7 +2287,9 @@ class VentanaAsignarArea(tk.Toplevel):
         self._sugerencia_actual: str = ""
 
         ttk.Label(
-            self, text=f"Usuario: {usuario}", style="Seccion.TLabel"
+            self,
+            text=etiqueta or f"Usuario: {usuario}",
+            style="Seccion.TLabel",
         ).pack(anchor="w", padx=18, pady=(16, 4))
         ttk.Label(
             self,

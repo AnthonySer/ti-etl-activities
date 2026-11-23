@@ -168,5 +168,116 @@ class PruebasValidacionSinDuplicados(unittest.TestCase):
         ventana.revision.actualizar.assert_not_called()
 
 
+class _TablaFalsa:
+    """Doble mínimo de ``ttk.Treeview`` para probar la selección masiva."""
+
+    def __init__(self, filas) -> None:
+        self.filas = tuple(filas)
+        self._seleccion: tuple[str, ...] = ()
+        self.foco: str | None = None
+
+    def get_children(self):
+        return self.filas
+
+    def selection_set(self, *iids) -> None:
+        self._seleccion = tuple(iids)
+
+    def selection_remove(self, *iids) -> None:
+        self._seleccion = tuple(
+            iid for iid in self._seleccion if iid not in iids
+        )
+
+    def selection(self):
+        return self._seleccion
+
+    def focus(self, iid=None) -> None:
+        self.foco = iid
+
+
+class PruebasSeleccionMasiva(unittest.TestCase):
+    def _ventana(self):
+        from ventana_validacion import VentanaValidacion
+
+        ventana = VentanaValidacion.__new__(VentanaValidacion)
+        ventana._tabla = _TablaFalsa(("r1", "r2", "r3"))
+        ventana._var_resumen = SimpleNamespace(set=mock.MagicMock())
+        ventana._var_seleccion = SimpleNamespace(set=mock.MagicMock())
+        return ventana
+
+    def test_seleccionar_todos_marca_todas_las_filas_visibles(self) -> None:
+        ventana = self._ventana()
+        ventana._seleccionar_todos()
+        self.assertEqual(ventana._tabla.selection(), ("r1", "r2", "r3"))
+        self.assertEqual(ventana._tabla.foco, "r1")
+        self.assertIn(
+            "3 registros seleccionados",
+            ventana._var_resumen.set.call_args[0][0],
+        )
+
+    def test_limpiar_seleccion_quita_todas_las_filas(self) -> None:
+        ventana = self._ventana()
+        ventana._tabla.selection_set("r1", "r3")
+        ventana._limpiar_seleccion()
+        self.assertEqual(ventana._tabla.selection(), ())
+
+
+class PruebasAsignacionMasiva(unittest.TestCase):
+    def _ventana(self):
+        from ventana_validacion import VentanaValidacion
+
+        ventana = VentanaValidacion.__new__(VentanaValidacion)
+        ventana.revision = mock.MagicMock()
+        ventana._refrescar = mock.MagicMock()
+        ventana._asignar_en_maestro = mock.MagicMock(return_value=True)
+        ventana._var_resumen = SimpleNamespace(set=mock.MagicMock())
+        return ventana
+
+    @mock.patch("ventana_validacion.messagebox")
+    def test_asigna_la_misma_area_a_todos_los_registros(self, mb) -> None:
+        mb.askyesno.return_value = True
+        ventana = self._ventana()
+        registros = [registro(usuario="A"), registro(usuario="B")]
+
+        ventana._aplicar_asignacion_masiva(registros, "SISTEMAS")
+
+        self.assertEqual(ventana._asignar_en_maestro.call_count, 2)
+        self.assertEqual(ventana.revision.asignar_manual.call_count, 2)
+        ventana.revision.asignar_manual.assert_any_call("A", "SISTEMAS")
+        ventana.revision.asignar_manual.assert_any_call("B", "SISTEMAS")
+        ventana.revision.guardar.assert_called_once()
+        ventana._refrescar.assert_called_once()
+        mensaje = ventana._var_resumen.set.call_args[0][0]
+        self.assertIn("2 de 2", mensaje)
+
+    @mock.patch("ventana_validacion.messagebox")
+    def test_cancelar_confirmacion_no_modifica_nada(self, mb) -> None:
+        mb.askyesno.return_value = False
+        ventana = self._ventana()
+
+        ventana._aplicar_asignacion_masiva(
+            [registro(usuario="A")], "SISTEMAS"
+        )
+
+        ventana._asignar_en_maestro.assert_not_called()
+        ventana.revision.asignar_manual.assert_not_called()
+        ventana.revision.guardar.assert_not_called()
+
+    @mock.patch("ventana_validacion.messagebox")
+    def test_informa_cuando_algun_registro_no_se_pudo_asignar(self, mb) -> None:
+        mb.askyesno.return_value = True
+        ventana = self._ventana()
+        ventana._asignar_en_maestro.side_effect = [True, False]
+
+        ventana._aplicar_asignacion_masiva(
+            [registro(usuario="A"), registro(usuario="B")], "SISTEMAS"
+        )
+
+        self.assertEqual(ventana.revision.asignar_manual.call_count, 1)
+        mensaje = ventana._var_resumen.set.call_args[0][0]
+        self.assertIn("1 de 2", mensaje)
+        self.assertIn("No asignados: 1", mensaje)
+        mb.showwarning.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
