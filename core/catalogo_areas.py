@@ -95,8 +95,15 @@ def buscar_similares(
     areas: Iterable[Any],
     *,
     umbral: float = UMBRAL_AREA_SIMILAR,
+    incluir_exactos: bool = False,
 ) -> list[AreaSimilar]:
-    """Devuelve áreas parecidas, ordenadas de mayor a menor similitud."""
+    """Devuelve áreas parecidas, ordenadas de mayor a menor similitud.
+
+    Por defecto excluye las coincidencias exactas normalizadas porque
+    ``validar_area`` las informa por separado. ``incluir_exactos=True`` las
+    agrega con similitud 1.0 para alertar sobre variantes como
+    ``ADMINISTRACIÓN`` frente a ``ADMINISTRACION``.
+    """
 
     clave = normalizar_area(nombre)
     if not clave:
@@ -112,16 +119,19 @@ def buscar_similares(
             continue
         vistos.add(otra)
         if otra == clave:
-            continue
-        puntaje = similitud.comparar(clave, otra)
-        # Reconoce abreviaturas formadas por iniciales, incluidas formas
-        # habituales como "RR HH" para "RECURSOS HUMANOS". Solo se considera
-        # coincidencia cuando la abreviatura completa coincide exactamente
-        # con las iniciales del nombre del área.
-        siglas_consulta = _siglas(clave)
-        siglas_area = _siglas(otra, iniciales=True)
-        if siglas_consulta and siglas_consulta == siglas_area:
-            puntaje = max(puntaje, 0.98)
+            if not incluir_exactos:
+                continue
+            puntaje = 1.0
+        else:
+            puntaje = similitud.comparar(clave, otra)
+            # Reconoce abreviaturas formadas por iniciales, incluidas formas
+            # habituales como "RR HH" para "RECURSOS HUMANOS". Solo se
+            # considera coincidencia cuando la abreviatura completa coincide
+            # exactamente con las iniciales del nombre del área.
+            siglas_consulta = _siglas(clave)
+            siglas_area = _siglas(otra, iniciales=True)
+            if siglas_consulta and siglas_consulta == siglas_area:
+                puntaje = max(puntaje, 0.98)
         if puntaje >= umbral:
             similares.append(
                 AreaSimilar(
@@ -132,6 +142,30 @@ def buscar_similares(
             )
     similares.sort(key=lambda item: item.similitud, reverse=True)
     return similares
+
+
+def buscar_posibles_duplicados(
+    nombre: Any,
+    areas: Iterable[Any] | None = None,
+    *,
+    maestro: Any = None,
+    umbral: float = UMBRAL_AREA_SIMILAR,
+) -> list[AreaSimilar]:
+    """Devuelve coincidencias exactas normalizadas y áreas parecidas.
+
+    Se usa antes de registrar o asignar un área nueva. No modifica el maestro:
+    solo entrega las opciones para que la persona decida si reutiliza una
+    denominación existente o cancela la operación.
+    """
+
+    if areas is None:
+        areas = catalogo_desde_maestro(maestro)
+    return buscar_similares(
+        nombre,
+        areas,
+        umbral=umbral,
+        incluir_exactos=True,
+    )
 
 
 def _siglas(valor: str, *, iniciales: bool = False) -> str:

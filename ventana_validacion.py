@@ -32,6 +32,7 @@ from core import revision as svc_revision
 from core import seguimiento_consultas as seguimiento
 from core import seleccion_empleados as sel
 from core.maestro import Maestro
+from core.normalizador import limpiar_area
 from database.connection import controlador_disponible
 from database.resolucion import (
     CASO_A,
@@ -286,40 +287,195 @@ class VentanaDecisionArea(tk.Toplevel):
         self.destroy()
 
 
+def _coincidencia_literal(
+    area: str, coincidencias: Iterable[catalogo_areas.AreaSimilar]
+) -> str | None:
+    """Devuelve el área cuando ya existe con exactamente el mismo texto."""
+
+    for item in coincidencias:
+        if item.similitud >= 0.999 and item.nombre == area:
+            return item.nombre
+    return None
+
+
+class VentanaPosibleAreaDuplicada(tk.Toplevel):
+    """Alerta y permite elegir un área ya registrada antes de duplicarla."""
+
+    def __init__(
+        self,
+        padre: tk.Misc,
+        *,
+        usuario: str,
+        area: str,
+        coincidencias: Iterable[catalogo_areas.AreaSimilar],
+    ) -> None:
+        super().__init__(padre)
+        self.title("Posible área duplicada")
+        self.geometry("640x430")
+        self.minsize(560, 360)
+        self.configure(bg=FONDO)
+        self.transient(padre)
+        self.grab_set()
+        self.area_elegida: str | None = None
+        self._coincidencias = list(coincidencias)
+
+        tk.Label(
+            self,
+            text="⚠️ POSIBLE ÁREA DUPLICADA",
+            bg=FONDO,
+            fg=ROJO,
+            font=(ui_tema.FUENTE, 12, "bold"),
+            anchor="w",
+        ).pack(anchor="w", padx=18, pady=(16, 4))
+        ttk.Label(
+            self,
+            text=f"Usuario: {usuario}",
+            style="Subtitulo.TLabel",
+        ).pack(anchor="w", padx=18, pady=(0, 8))
+        ttk.Label(
+            self,
+            text=(
+                f"El área '{area}' es similar a un área que ya existe en el "
+                "maestro de tickets:"
+            ),
+            wraplength=590,
+            justify="left",
+        ).pack(anchor="w", padx=18, pady=(0, 8))
+
+        if len(self._coincidencias) == 1:
+            instruccion = "Área registrada:"
+        else:
+            instruccion = (
+                f"Se encontraron {len(self._coincidencias)} áreas similares. "
+                "Seleccione la que corresponde:"
+            )
+        ttk.Label(self, text=instruccion).pack(anchor="w", padx=18)
+
+        marco = ttk.Frame(self)
+        marco.pack(fill="both", expand=True, padx=18, pady=(4, 8))
+        self._lista = tk.Listbox(
+            marco,
+            height=min(6, max(2, len(self._coincidencias))),
+            exportselection=False,
+            bg=SUPERFICIE,
+            fg=TEXTO,
+            selectbackground=AZUL_SUAVE,
+            selectforeground=TEXTO,
+            font=(ui_tema.FUENTE, 10),
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=BORDE,
+            activestyle="none",
+        )
+        barra = ttk.Scrollbar(marco, orient="vertical", command=self._lista.yview)
+        self._lista.configure(yscrollcommand=barra.set)
+        self._lista.pack(side="left", fill="both", expand=True)
+        barra.pack(side="right", fill="y")
+        for item in self._coincidencias:
+            detalle = (
+                "coincidencia exacta"
+                if item.similitud >= 0.999
+                else f"{item.similitud:.0%} de similitud"
+            )
+            self._lista.insert(tk.END, f"{item.nombre} — {detalle}")
+        if self._coincidencias:
+            self._lista.selection_set(0)
+        self._lista.bind("<Double-1>", lambda _evento: self._usar_existente())
+
+        ttk.Label(
+            self,
+            text=(
+                "¿Desea utilizar el área existente en lugar de registrar una "
+                "nueva?"
+            ),
+            wraplength=590,
+            justify="left",
+        ).pack(anchor="w", padx=18, pady=(0, 8))
+
+        botones = ttk.Frame(self)
+        botones.pack(fill="x", padx=18, pady=(0, 16))
+        ttk.Button(
+            botones,
+            text="Utilizar área existente",
+            style="Principal.TButton",
+            command=self._usar_existente,
+        ).pack(side="right")
+        ttk.Button(botones, text="Cancelar", command=self.destroy).pack(
+            side="right", padx=(0, 8)
+        )
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self._lista.focus_set()
+
+    def _usar_existente(self) -> None:
+        seleccion = self._lista.curselection()
+        if not seleccion:
+            messagebox.showwarning(
+                "Seleccione un área",
+                "Seleccione el área existente que desea utilizar.",
+                parent=self,
+            )
+            return
+        self.area_elegida = self._coincidencias[seleccion[0]].nombre
+        self.destroy()
+
+
+def pedir_decision_area_duplicada(
+    padre: tk.Misc,
+    *,
+    usuario: str,
+    area: str,
+    coincidencias: Iterable[catalogo_areas.AreaSimilar],
+) -> str | None:
+    """Muestra la alerta de duplicado y devuelve el área elegida o None."""
+
+    lista = list(coincidencias)
+    if not lista:
+        return None
+    dialogo = VentanaPosibleAreaDuplicada(
+        padre,
+        usuario=usuario,
+        area=area,
+        coincidencias=lista,
+    )
+    try:
+        padre.wait_window(dialogo)
+    except tk.TclError:
+        pass
+    return dialogo.area_elegida
+
+
 def pedir_decision_area(
     padre: tk.Misc, usuario: str, area: str, maestro: Maestro
 ) -> str | None:
     """Solicita reutilizar, crear o confirmar un área de forma directa y clara."""
 
-    actual = str(area or "").strip()
+    actual = limpiar_area(area) or ""
     if not actual:
-        messagebox.showwarning("Área vacía", "El nombre del área no puede estar vacío.", parent=padre)
+        messagebox.showwarning(
+            "Área vacía",
+            "El nombre del área no puede estar vacío.",
+            parent=padre,
+        )
         return None
 
     resultado = catalogo_areas.validar_area(actual, maestro=maestro)
     if not resultado.valido:
         messagebox.showwarning("Área no válida", resultado.mensaje, parent=padre)
         return None
-    if resultado.existente:
-        return resultado.area_reutilizable or resultado.nombre
 
-    if resultado.similares:
-        mejor = resultado.similares[0]
-        respuesta = messagebox.askyesnocancel(
-            "Área similar detectada",
-            f"Para el usuario '{usuario}', escribió el área:\n  • \"{actual}\"\n\n"
-            f"En el catálogo ya existe un área similar:\n  • \"{mejor.nombre}\" ({mejor.similitud:.0%} de coincidencia)\n\n"
-            f"¿Desea usar el área existente '{mejor.nombre}'?\n\n"
-            f"• SÍ: Usa '{mejor.nombre}' (recomendado para no duplicar áreas).\n"
-            f"• NO: Registra '{actual}' como una NUEVA área.\n"
-            f"• Cancelar: Vuelve atrás sin guardar cambios.",
-            parent=padre,
+    coincidencias = catalogo_areas.buscar_posibles_duplicados(
+        actual, maestro=maestro
+    )
+    literal = _coincidencia_literal(actual, coincidencias)
+    if literal:
+        return literal
+    if coincidencias:
+        return pedir_decision_area_duplicada(
+            padre,
+            usuario=usuario,
+            area=actual,
+            coincidencias=coincidencias,
         )
-        if respuesta is True:
-            return mejor.nombre
-        if respuesta is False:
-            return actual
-        return None
 
     if messagebox.askyesno(
         "Registrar nueva área",
@@ -1440,6 +1596,7 @@ class VentanaValidacion(tk.Toplevel):
             usuario=str(registro.get("usuario") or ""),
             areas=self._areas_disponibles(),
             al_guardar=lambda area: self._aplicar_asignacion(registro, area),
+            maestro=self.maestro,
         )
         return True
 
@@ -1458,6 +1615,7 @@ class VentanaValidacion(tk.Toplevel):
                 usuario=str(registro.get("usuario") or ""),
                 areas=self._areas_disponibles(),
                 al_guardar=lambda area: self._aplicar_asignacion(registro, area),
+                maestro=self.maestro,
             )
             return
         VentanaAsignarArea(
@@ -1468,6 +1626,7 @@ class VentanaValidacion(tk.Toplevel):
             al_guardar=lambda area: self._aplicar_asignacion_masiva(
                 registros, area
             ),
+            maestro=self.maestro,
         )
 
     def _crear_area_desde_coincidencia(
@@ -1490,6 +1649,7 @@ class VentanaValidacion(tk.Toplevel):
             al_guardar=lambda area: self._aplicar_area_nueva(
                 registro, candidato, area
             ),
+            maestro=self.maestro,
         )
 
     def _aplicar_area_nueva(
@@ -1757,6 +1917,31 @@ class VentanaValidacion(tk.Toplevel):
             ),
         )
 
+    def _resolver_area_inactivo(self, usuario: str, area: str) -> str | None:
+        """Valida el área de SQL contra el catálogo antes de asignarla.
+
+        Solo se usa en el flujo de usuarios inactivos. Devuelve el nombre
+        canónico a asignar o ``None`` si la persona cancela.
+        """
+
+        actual = limpiar_area(area) or ""
+        if not actual:
+            return None
+        coincidencias = catalogo_areas.buscar_posibles_duplicados(
+            actual, maestro=self.maestro
+        )
+        literal = _coincidencia_literal(actual, coincidencias)
+        if literal:
+            return literal
+        if coincidencias:
+            return pedir_decision_area_duplicada(
+                self,
+                usuario=usuario,
+                area=actual,
+                coincidencias=coincidencias,
+            )
+        return actual
+
     def _elegir_candidato(
         self,
         registro: dict[str, Any],
@@ -1818,6 +2003,10 @@ class VentanaValidacion(tk.Toplevel):
             permitir_inactivo and resolucion.estado == ESTADO_INACTIVO
         )
         area = resolucion.area if puede_asignar and resolucion.asignable else ""
+        if area and resolucion.estado == ESTADO_INACTIVO:
+            area = self._resolver_area_inactivo(usuario, area) or ""
+            if not area:
+                return False
         estado = ESTADO_VALIDADO if area else resolucion.estado
         if area and not confirmacion_previa and not self._confirmar_asignacion_candidato(
             usuario, candidato, area
@@ -2416,6 +2605,7 @@ class VentanaAsignarArea(tk.Toplevel):
         al_guardar: Callable[[str], None],
         area_inicial: str = "",
         etiqueta: str | None = None,
+        maestro: Maestro | None = None,
     ) -> None:
         super().__init__(padre)
         self.title(etiqueta or "Asignar o agregar área")
@@ -2424,8 +2614,15 @@ class VentanaAsignarArea(tk.Toplevel):
         self.configure(bg=FONDO)
         self.transient(padre)
         self.grab_set()
+        self._usuario = usuario
         self._al_guardar = al_guardar
         self._areas = filtrar_areas(areas)
+        catalogo = (
+            catalogo_areas.catalogo_desde_maestro(maestro)
+            if maestro is not None
+            else []
+        )
+        self._catalogo = catalogo or self._areas
         self._sugerencia_actual: str = ""
 
         ttk.Label(
@@ -2498,20 +2695,31 @@ class VentanaAsignarArea(tk.Toplevel):
             self._var_estado_sugerencias.set("Seleccione una opción o escriba un nombre nuevo.")
             return
 
-        match_exacto = next(
-            (op for op in self._areas if op.casefold() == texto.casefold()), None
+        coincidencias = catalogo_areas.buscar_posibles_duplicados(
+            texto, self._catalogo
         )
-        if match_exacto:
-            self._var_estado_sugerencias.set(f"✓ Área existente: '{match_exacto}'")
+        literal = _coincidencia_literal(limpiar_area(texto) or "", coincidencias)
+        if literal:
+            self._var_estado_sugerencias.set(f"✓ Área existente: '{literal}'")
             return
 
-        similares = catalogo_areas.buscar_similares(texto, self._areas, umbral=0.75)
-        if similares:
-            mejor = similares[0]
+        if coincidencias:
+            mejor = coincidencias[0]
             self._sugerencia_actual = mejor.nombre
-            self._var_estado_sugerencias.set(
-                f"Parecida a: '{mejor.nombre}' ({mejor.similitud:.0%})"
-            )
+            if len(coincidencias) == 1:
+                detalle = (
+                    "coincidencia exacta sin tildes/mayúsculas"
+                    if mejor.similitud >= 0.999
+                    else f"{mejor.similitud:.0%} de similitud"
+                )
+                self._var_estado_sugerencias.set(
+                    f"⚠ Posible área duplicada: '{mejor.nombre}' ({detalle})"
+                )
+            else:
+                self._var_estado_sugerencias.set(
+                    f"⚠ {len(coincidencias)} áreas similares; la más cercana "
+                    f"es '{mejor.nombre}' ({mejor.similitud:.0%})"
+                )
             self._btn_usar_sug.pack(side="right")
             return
 
@@ -2521,43 +2729,40 @@ class VentanaAsignarArea(tk.Toplevel):
         self._filtrar_sugerencias()
 
     def _guardar(self) -> None:
-        area = self._var_area.get().strip()
+        area = limpiar_area(self._var_area.get()) or ""
         if not area:
             messagebox.showwarning("Área vacía", "Indique un área válida.", parent=self)
             return
 
-        match_exacto = next(
-            (op for op in self._areas if op.casefold() == area.casefold()), None
+        coincidencias = catalogo_areas.buscar_posibles_duplicados(
+            area, self._catalogo
         )
-        if match_exacto:
-            area_final = match_exacto
-        elif self._sugerencia_actual:
-            resp = messagebox.askyesnocancel(
-                "Área similar detectada",
-                f"Escribió '{area}', pero ya existe '{self._sugerencia_actual}'.\n\n"
-                f"¿Desea usar '{self._sugerencia_actual}' en su lugar?\n\n"
-                f"• Sí: Usa '{self._sugerencia_actual}' (recomendado).\n"
-                f"• No: Crea '{area}' como una nueva área.\n"
-                f"• Cancelar: Vuelve a editar.",
-                parent=self,
+        literal = _coincidencia_literal(area, coincidencias)
+        if literal:
+            self._al_guardar(literal)
+            self.destroy()
+            return
+        if coincidencias:
+            area_elegida = pedir_decision_area_duplicada(
+                self,
+                usuario=self._usuario,
+                area=area,
+                coincidencias=coincidencias,
             )
-            if resp is True:
-                area_final = self._sugerencia_actual
-            elif resp is False:
-                area_final = area
-            else:
+            if not area_elegida:
                 return
-        else:
-            if not messagebox.askyesno(
-                "Registrar nueva área",
-                f"El área '{area}' no existe en el catálogo.\n\n"
-                f"¿Confirma que desea crearla y registrarla?",
-                parent=self,
-            ):
-                return
-            area_final = area
+            self._al_guardar(area_elegida)
+            self.destroy()
+            return
 
-        self._al_guardar(area_final)
+        if not messagebox.askyesno(
+            "Registrar nueva área",
+            f"El área '{area}' no existe en el catálogo.\n\n"
+            f"¿Confirma que desea crearla y registrarla?",
+            parent=self,
+        ):
+            return
+        self._al_guardar(area)
         self.destroy()
 
 
