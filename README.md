@@ -105,6 +105,9 @@ Reglas estructurales:
 - **Validación asistida:** ventana dedicada con KPIs, filtros, asignación manual,
   consulta SQL Server (solo lectura), revisión de homónimos, validación masiva y
   reanudación de revisiones guardadas.
+- **Consultas SQL:** editor de consultas de solo lectura, selección y orden de
+  columnas, vista previa y exportación a Excel; permite guardar consultas e
+  historial local de ejecuciones.
 - **Generación controlada:** modo `normal` (una hoja) y `detalle` (cinco hojas),
   con respaldo previo, reemplazo atómico, manifiesto JSON y bloqueo si quedan
   registros sin área salvo confirmación explícita de generación parcial.
