@@ -75,6 +75,7 @@ from database.synchronizer import (
     resumen_sincronizacion,
 )
 from panel_principal import PanelPrincipal, SEMANTICA
+from interfaz_consultas_sql import SeccionConsultasSQL
 import ui_tema
 from ui_tema import (
     AZUL_MARINO,
@@ -1616,6 +1617,7 @@ class AplicacionTk(tk.Tk):
         ("↻", "Reimportar Correcciones"),
         ("▤", "Maestro Histórico"),
         ("▥", "Reportes"),
+        ("⌨", "Consultas SQL"),
         ("🛡", "Auditoría"),
     )
 
@@ -1707,6 +1709,7 @@ class AplicacionTk(tk.Tk):
         self._tab_reimportar = ttk.Frame(self._cuaderno, padding=18)
         self._tab_maestro = ttk.Frame(self._cuaderno, padding=18)
         self._tab_reportes = ttk.Frame(self._cuaderno, padding=18)
+        self._tab_consultas = ttk.Frame(self._cuaderno, padding=18)
         self._tab_auditoria = ttk.Frame(self._cuaderno, padding=18)
 
         self._cuaderno.add(self._tab_panel, text="Panel principal")
@@ -1715,6 +1718,7 @@ class AplicacionTk(tk.Tk):
         self._cuaderno.add(self._tab_reimportar, text="Reimportar correcciones")
         self._cuaderno.add(self._tab_maestro, text="Maestro histórico")
         self._cuaderno.add(self._tab_reportes, text="Reportes")
+        self._cuaderno.add(self._tab_consultas, text="Consultas SQL")
         self._cuaderno.add(self._tab_auditoria, text="Auditoría")
         self._cuaderno.bind("<<NotebookTabChanged>>", self._al_cambiar_pestana)
 
@@ -1724,6 +1728,7 @@ class AplicacionTk(tk.Tk):
         self._construir_reimportar()
         self._construir_maestro()
         self._construir_reportes()
+        self._construir_consultas_sql()
         self._construir_auditoria()
 
     def _al_cambiar_pestana(self, _evento=None) -> None:
@@ -4130,6 +4135,12 @@ class AplicacionTk(tk.Tk):
             "evolución semanal, esfuerzo y recurrencia. Se guarda como Excel y Markdown "
             "en la carpeta reportes.",
         )
+
+    def _construir_consultas_sql(self) -> None:
+        self._seccion_consultas = SeccionConsultasSQL(
+            self._tab_consultas, self
+        )
+        self._seccion_consultas.pack(fill="both", expand=True)
 
     def _elegir_origen_reporte(self) -> Path | None:
         origen = self._var_origen_reporte.get()
