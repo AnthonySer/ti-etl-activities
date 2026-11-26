@@ -867,6 +867,23 @@ class PruebasReportes(BaseTemporal):
             self.skipTest("No está disponible el Excel de septiembre.")
         return extraer(ruta).df
 
+    def test_distribucion_actividad_plural_sin_cambiar_datos_fuente(self) -> None:
+        filas = []
+        for actividad in ("Incidencia", "Solicitud", "Proyecto"):
+            fila = {columna: None for columna in COLUMNAS_OFICIALES}
+            fila[C_ACTIVIDAD] = actividad
+            filas.append(fila)
+        df = pd.DataFrame(filas)
+
+        tabla = distribuciones(df)["Por actividad"]
+
+        self.assertEqual(
+            set(tabla["Grupo"]),
+            {"Incidencias", "Solicitudes", "Proyectos"},
+        )
+        self.assertEqual(df[C_ACTIVIDAD].tolist(), ["Incidencia", "Solicitud", "Proyecto"])
+        self.assertEqual(tabla["Tickets"].sum(), 3)
+
     def test_indicadores_septiembre(self) -> None:
         df = self._datos_septiembre()
         indicadores = calcular_indicadores(df)
@@ -959,7 +976,7 @@ class PruebasReportes(BaseTemporal):
             )
             self.assertEqual(
                 [fila[0] for fila in libro["RESUMEN"].iter_rows(min_row=2, max_row=5, values_only=True)],
-                ["Incidencia", "Proyecto", "Solicitud", "TOTAL GENERAL"],
+                ["Incidencias", "Proyectos", "Solicitudes", "TOTAL GENERAL"],
             )
             resumen = libro["RESUMEN"]
             self.assertAlmostEqual(resumen["C2"].value, 3.5 / 11.5, places=6)
@@ -980,7 +997,7 @@ class PruebasReportes(BaseTemporal):
                         min_row=2, max_row=3, values_only=True
                     )
                 ],
-                ["Incidencia", "Solicitud"],
+                ["Incidencias", "Solicitudes"],
             )
             self.assertNotIn(
                 "Proyecto",
@@ -999,6 +1016,9 @@ class PruebasReportes(BaseTemporal):
             )
             self.assertEqual(libro["DETALLE"].max_column, 6)
             self.assertEqual(libro["DETALLE"]["C2"].value.date(), date(2026, 9, 1))
+            self.assertEqual(libro["DETALLE"]["A2"].value, "Incidencias")
+            self.assertEqual(libro["DETALLE"]["A3"].value, "Solicitudes")
+            self.assertEqual(libro["DETALLE"]["A4"].value, "Proyectos")
             self.assertEqual(libro["DETALLE"]["C2"].number_format, "dd/mm/yyyy")
             self.assertEqual(libro["DETALLE"]["C3"].value.hour, 14)
             self.assertEqual(libro["DETALLE"]["C3"].number_format, "dd/mm/yyyy")
@@ -1098,7 +1118,7 @@ class PruebasReportes(BaseTemporal):
             self.assertEqual(libro["RESUMEN"]["C3"].value, 0)
             self.assertEqual(libro["PROYECTOS"]["A2"].value, "TOTAL GENERAL")
             self.assertEqual(libro["PROYECTOS"]["B2"].value, 0)
-            self.assertEqual(libro["ACTIVIDAD"]["A2"].value, "Incidencia")
+            self.assertEqual(libro["ACTIVIDAD"]["A2"].value, "Incidencias")
             self.assertEqual(libro["ACTIVIDAD"]["B2"].value, 1)
             self.assertEqual(libro["ACTIVIDAD"]["A3"].value, "TOTAL GENERAL")
             self.assertEqual(libro["ACTIVIDAD"]["B3"].value, 1)

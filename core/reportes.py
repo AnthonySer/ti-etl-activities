@@ -26,7 +26,11 @@ from core.esquema import (
     C_SUBTIPO,
     COLUMNAS_OFICIALES,
 )
-from core.procesado import escribir_reporte_excel
+from core.procesado import (
+    _ETIQUETAS_CATEGORIA,
+    _categoria_actividad,
+    escribir_reporte_excel,
+)
 
 LOGGER = logging.getLogger("automatizador")
 
@@ -290,6 +294,12 @@ def calcular_indicadores(
 
 
 def distribuciones(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    actividad = df.copy()
+    actividad[C_ACTIVIDAD] = actividad[C_ACTIVIDAD].map(
+        lambda valor: _ETIQUETAS_CATEGORIA.get(
+            _categoria_actividad(valor), valor
+        )
+    )
     return {
         "Por atencion": tabla_agrupada(df, C_ATENCION),
         "Por requerimiento": tabla_agrupada(df, C_REQUERIMIENTO),
@@ -297,7 +307,7 @@ def distribuciones(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
         "Por area": tabla_agrupada(df, C_AREA),
         "Por subtipo": tabla_agrupada(df, C_SUBTIPO),
         "Por proyecto": tabla_agrupada(df, C_PROYECTO),
-        "Por actividad": tabla_agrupada(df, C_ACTIVIDAD),
+        "Por actividad": tabla_agrupada(actividad, C_ACTIVIDAD),
         "Por solicitante": tabla_agrupada(df, C_SOLICITANTE),
     }
 
