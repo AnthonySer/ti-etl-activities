@@ -634,20 +634,33 @@ def _categoria_actividad(valor: Any) -> str:
     return texto.title() if texto else ""
 
 
+_ETIQUETAS_CATEGORIA = {
+    "Incidencia": "Incidencias",
+    "Proyecto": "Proyectos",
+    "Solicitud": "Solicitudes",
+}
+
+
+def _categoria_actividad_display(valor: Any) -> str:
+    categoria = _categoria_actividad(valor)
+    return _ETIQUETAS_CATEGORIA.get(categoria, categoria)
+
+
 def _tabla_resumen(df: pd.DataFrame) -> pd.DataFrame:
     horas = pd.to_numeric(df[C_HORAS], errors="coerce").fillna(0.0)
     total_horas = float(horas.sum())
     categorias = ["Incidencia", "Proyecto", "Solicitud"]
+    categorias_fuente = df[C_ACTIVIDAD].map(_categoria_actividad)
     filas = []
     for categoria in categorias:
-        mask = df[C_ACTIVIDAD].map(_categoria_actividad) == categoria
+        mask = categorias_fuente == categoria
         if not mask.any():
             continue
         total = float(horas[mask].sum())
         porcentaje = 0.0 if total_horas == 0 else total / total_horas
         filas.append(
             {
-                "TIPO DE ATENCION": categoria,
+                "TIPO DE ATENCION": _ETIQUETAS_CATEGORIA[categoria],
                 "TIEMPO(H)": round(total, 2),
                 "%": round(porcentaje, 6),
             }
@@ -705,7 +718,7 @@ def _tabla_actividad(df: pd.DataFrame) -> pd.DataFrame:
     incluidas = categorias.isin({"Incidencia", "Solicitud"})
     filtrado = pd.DataFrame(
         {
-            "TIPO DE ACTIVIDAD": categorias[incluidas],
+            "TIPO DE ACTIVIDAD": categorias[incluidas].map(_ETIQUETAS_CATEGORIA),
         }
     )
     if filtrado.empty:
@@ -791,6 +804,11 @@ def _tabla_detalle(df: pd.DataFrame) -> pd.DataFrame:
         :,
         ["TIPO DE ATENCION", "DETALLE", "FECHA", "USUARIO", "AREA_USUARIO", "HORAS"],
     ].copy()
+    detalle["TIPO DE ATENCION"] = detalle["TIPO DE ATENCION"].map(
+        lambda valor: _ETIQUETAS_CATEGORIA.get(
+            _categoria_actividad(valor), _valor_reporte(valor)
+        )
+    )
     for columna in detalle.columns:
         detalle[columna] = detalle[columna].map(_valor_reporte)
     return detalle

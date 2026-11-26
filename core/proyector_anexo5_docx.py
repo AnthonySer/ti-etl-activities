@@ -26,7 +26,11 @@ _MESES = (
     "enero", "febrero", "marzo", "abril", "mayo", "junio",
     "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
 )
-_ETIQUETAS_ACTIVIDAD = {"Incidencia": "Incidencias", "Solicitud": "Solicitud"}
+_ETIQUETAS_CATEGORIA = {
+    "Incidencia": "Incidencias",
+    "Solicitud": "Solicitudes",
+    "Proyecto": "Proyectos",
+}
 _ETIQUETA_AREA_VACIA = "(SIN ÁREA)"
 _ETIQUETA_RESPONSABLE_VACIO = "(SIN RESPONSABLE)"
 
@@ -60,7 +64,7 @@ def _porcentaje(valor: Decimal | int | float, total: Decimal) -> str:
 
 def _categoria_visible(categoria: str | None, actividad_original: object) -> str:
     if categoria is not None:
-        return categoria
+        return _ETIQUETAS_CATEGORIA.get(categoria, categoria)
     actividad = str(actividad_original).strip() if not _vacio(actividad_original) else ""
     return "Sin clasificar: " + (actividad or "(VACÍO)")
 
@@ -119,7 +123,7 @@ def preparar_contenido_anexo5(
     vals_grafico_horas = []
     for categoria in estadisticas.filas_por_categoria:
         horas = horas_por_categoria.get(categoria.categoria, Decimal("0"))
-        etiqueta = categoria.categoria
+        etiqueta = _ETIQUETAS_CATEGORIA.get(categoria.categoria, categoria.categoria)
         valor_visible = _numero(horas)
         if categoria.filas_sin_horas or categoria.filas_con_horas_invalidas:
             valor_visible += " (parcial)"
@@ -186,7 +190,7 @@ def preparar_contenido_anexo5(
     cats_grafico_actividad = []
     vals_grafico_actividad = []
     for fila in categorias_ticket:
-        etiqueta = _ETIQUETAS_ACTIVIDAD.get(fila.categoria, fila.categoria)
+        etiqueta = _ETIQUETAS_CATEGORIA.get(fila.categoria, fila.categoria)
         filas_tipo_actividad.append((etiqueta, str(fila.cantidad_registros), _porcentaje(fila.cantidad_registros, Decimal(estadisticas.filas_analizadas - estadisticas.actividades_proyecto))))
         cats_grafico_actividad.append(etiqueta)
         vals_grafico_actividad.append(fila.cantidad_registros)

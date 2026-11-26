@@ -170,6 +170,61 @@ class TestProyectorAnexo5Docx(unittest.TestCase):
         self.assertTrue(any("sin nombre" in alerta for alerta in contenido.advertencias))
         self.assertTrue(any("horas vacías o inválidas" in alerta for alerta in contenido.advertencias))
 
+    def test_etiquetas_de_categoria_en_tablas_y_graficos_son_plurales(self):
+        with tempfile.TemporaryDirectory(prefix="anexo5-etiquetas-") as carpeta:
+            source = Path(carpeta) / "categorias.xlsx"
+            crear_excel(source, [
+                fila(Actividad="Incidencia", Horas=2),
+                fila(Actividad="Solicitud", Atención="Solicitud", Horas=3),
+                fila(Actividad="Proyecto", Proyecto="Portal", Atención="Proyectos", Horas=4),
+            ])
+            datos = leer_excel_informe(source)
+            stats = calcular_estadisticas_informe(datos)
+            contenido = preparar_contenido_anexo5(datos, stats)
+
+        self.assertEqual(
+            [fila[0] for fila in contenido.filas_por_tabla["resumen_tipo_atencion"]],
+            ["Incidencias", "Solicitudes", "Proyectos"],
+        )
+        self.assertEqual(
+            [fila[1] for fila in contenido.filas_por_tabla["resumen_tipo_atencion"]],
+            ["2.00", "3.00", "4.00"],
+        )
+        self.assertEqual(
+            [fila[0] for fila in contenido.filas_por_tabla["tickets_tipo"]],
+            ["Incidencias", "Solicitudes"],
+        )
+        self.assertEqual(
+            contenido.series_por_grafico[1].categorias,
+            ("Incidencias", "Solicitudes", "Proyectos"),
+        )
+        self.assertEqual(
+            contenido.series_por_grafico[3].categorias,
+            ("Incidencias", "Solicitudes"),
+        )
+        self.assertEqual(
+            [fila[0] for fila in contenido.filas_por_tabla["detalle"]],
+            ["Incidencias", "Solicitudes", "Proyectos"],
+        )
+        with tempfile.TemporaryDirectory(prefix="anexo5-graficos-") as carpeta:
+            salida = Path(carpeta) / "Anexo5_etiquetas.docx"
+            generar_anexo5_docx(
+                PLANTILLA,
+                salida,
+                reemplazos_texto=contenido.reemplazos_texto,
+                filas_por_tabla=contenido.filas_por_tabla,
+                totales_por_tabla=contenido.totales_por_tabla,
+                series_por_grafico=contenido.series_por_grafico,
+            )
+            with ZipFile(salida) as paquete:
+                grafico_horas = paquete.read("word/charts/chart1.xml").decode("utf-8")
+                grafico_actividad = paquete.read("word/charts/chart3.xml").decode("utf-8")
+                self.assertIn("Incidencias", grafico_horas)
+                self.assertIn("Solicitudes", grafico_horas)
+                self.assertIn("Proyectos", grafico_horas)
+                self.assertIn("Incidencias", grafico_actividad)
+                self.assertIn("Solicitudes", grafico_actividad)
+
     def test_no_proyecta_varios_meses_sin_seleccion(self):
         with tempfile.TemporaryDirectory(prefix="anexo5-meses-") as carpeta:
             source = Path(carpeta) / "meses.xlsx"
@@ -207,13 +262,13 @@ class TestProyectorAnexo5Docx(unittest.TestCase):
             self.assertEqual(len(tablas["areas"].rows), 23)
             self.assertEqual(len(tablas["detalle"].rows), 180)
             resumen_horas = {fila.cells[0].text: fila.cells[1].text for fila in tablas["resumen_tipo_atencion"].rows[1:]}
-            self.assertEqual(resumen_horas["Incidencia"], "148.50")
-            self.assertEqual(resumen_horas["Proyecto"], "83.50")
-            self.assertEqual(resumen_horas["Solicitud"], "194.75")
+            self.assertEqual(resumen_horas["Incidencias"], "148.50")
+            self.assertEqual(resumen_horas["Proyectos"], "83.50")
+            self.assertEqual(resumen_horas["Solicitudes"], "194.75")
             self.assertEqual(resumen_horas["TOTAL"], "426.75")
             tickets = {fila.cells[0].text: fila.cells[1].text for fila in tablas["tickets_tipo"].rows[1:]}
             self.assertEqual(tickets["Incidencias"], "88")
-            self.assertEqual(tickets["Solicitud"], "57")
+            self.assertEqual(tickets["Solicitudes"], "57")
             self.assertEqual(tickets["TOTAL GENERAL"], "145")
             self.assertEqual(tablas["areas"].rows[-1].cells[1].text, "145")
             responsables = {
