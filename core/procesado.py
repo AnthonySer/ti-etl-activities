@@ -660,19 +660,19 @@ def _tabla_resumen(df: pd.DataFrame) -> pd.DataFrame:
         porcentaje = 0.0 if total_horas == 0 else total / total_horas
         filas.append(
             {
-                "TIPO DE ATENCION": _ETIQUETAS_CATEGORIA[categoria],
+                "TIPO DE ATENCIÓN": _ETIQUETAS_CATEGORIA[categoria],
                 "TIEMPO(H)": round(total, 2),
                 "%": round(porcentaje, 6),
             }
         )
     filas.append(
         {
-            "TIPO DE ATENCION": "TOTAL GENERAL",
+            "TIPO DE ATENCIÓN": "TOTAL GENERAL",
             "TIEMPO(H)": round(total_horas, 2),
             "%": 1.0 if total_horas else 0.0,
         }
     )
-    return pd.DataFrame(filas, columns=["TIPO DE ATENCION", "TIEMPO(H)", "%"])
+    return pd.DataFrame(filas, columns=["TIPO DE ATENCIÓN", "TIEMPO(H)", "%"])
 
 
 def _tabla_proyectos(df: pd.DataFrame) -> pd.DataFrame:
@@ -714,8 +714,8 @@ def _tabla_actividad(df: pd.DataFrame) -> pd.DataFrame:
     porcentajes.
     """
 
-    categorias = df[C_ACTIVIDAD].map(_categoria_actividad)
-    incluidas = categorias.isin({"Incidencia", "Solicitud"})
+    categorias = df[C_ACTIVIDAD].map(_categoria_actividad_display)
+    incluidas = categorias.isin({"Incidencias", "Solicitudes"})
     filtrado = pd.DataFrame(
         {
             "TIPO DE ACTIVIDAD": categorias[incluidas].map(_ETIQUETAS_CATEGORIA),
@@ -792,7 +792,7 @@ def _tabla_detalle(df: pd.DataFrame) -> pd.DataFrame:
     detalle = df[[C_ACTIVIDAD, C_DETALLE, C_FECHA, C_SOLICITANTE, C_AREA, C_HORAS]].copy()
     detalle = detalle.rename(
         columns={
-            C_ACTIVIDAD: "TIPO DE ATENCION",
+            C_ACTIVIDAD: "TIPO DE ATENCIÓN",
             C_DETALLE: "DETALLE",
             C_FECHA: "FECHA",
             C_SOLICITANTE: "USUARIO",
@@ -802,9 +802,9 @@ def _tabla_detalle(df: pd.DataFrame) -> pd.DataFrame:
     )
     detalle = detalle.loc[
         :,
-        ["TIPO DE ATENCION", "DETALLE", "FECHA", "USUARIO", "AREA_USUARIO", "HORAS"],
+        ["TIPO DE ATENCIÓN", "DETALLE", "FECHA", "USUARIO", "AREA_USUARIO", "HORAS"],
     ].copy()
-    detalle["TIPO DE ATENCION"] = detalle["TIPO DE ATENCION"].map(
+    detalle["TIPO DE ATENCIÓN"] = detalle["TIPO DE ATENCIÓN"].map(
         lambda valor: _ETIQUETAS_CATEGORIA.get(
             _categoria_actividad(valor), _valor_reporte(valor)
         )

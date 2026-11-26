@@ -38,7 +38,7 @@ from core.modelo_informe_docx import (
 from core.procesado import _categoria_actividad
 
 
-_CATEGORIAS_RECONOCIDAS = {"Incidencia", "Solicitud", "Proyecto"}
+_CATEGORIAS_RECONOCIDAS = {"Incidencia": "Incidencias", "Solicitud": "Solicitudes", "Proyecto": "Proyectos"}
 _LIMITE_BUSQUEDA_ENCABEZADO = 30
 
 
