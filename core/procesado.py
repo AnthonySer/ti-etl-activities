@@ -718,7 +718,7 @@ def _tabla_actividad(df: pd.DataFrame) -> pd.DataFrame:
     incluidas = categorias.isin({"Incidencias", "Solicitudes"})
     filtrado = pd.DataFrame(
         {
-            "TIPO DE ACTIVIDAD": categorias[incluidas].map(_ETIQUETAS_CATEGORIA),
+            "TIPO DE ACTIVIDAD": categorias[incluidas],
         }
     )
     if filtrado.empty:
