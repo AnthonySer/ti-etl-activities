@@ -12,20 +12,24 @@ from docx.table import Table
 
 
 ENCABEZADOS_TABLA = {
-    "resumen_tipo_atencion": ("TIPO DE ATENCION", "TIEMPO(H)", "%"),
-    "responsables": ("RESPONSABLE DE ATENCION", "TIEMPO(H)", "%"),
-    "proyectos": ("PROYECTOS", "TIEMPO(H)", "%"),
+    "resumen_tipo_atencion": ("TIPO DE ATENCIÓN", "TIEMPO(H)", "%"),
+    "responsables": ("RESPONSABLE DE ATENCIÓN", "TIEMPO(H)", "%"),
+    "proyectos": ("PROYECTO", "TIEMPO(H)", "%"),
     "tickets_tipo": ("TIPO DE ACTIVIDAD", "TICKETS", "%"),
-    "areas": ("AREAS", "TICKETS", "%"),
+    "areas": ("ÁREAS", "TICKETS", "%"),
     "detalle": (
-        "TIPO DE ATENCION", "DETALLE", "FECHA", "USUARIO", "AREA_USUARIO", "HORAS"
+        "TIPO DE ATENCIÓN", "DETALLE", "FECHA", "USUARIO", "ÁREA", "TIEMPO"
     ),
 }
 
 # La plantilla nueva titula la tabla de áreas en singular. Se aceptan ambas
 # variantes para no depender de una versión concreta de la plantilla.
 ENCABEZADOS_ALTERNATIVOS = {
+    "proyectos": (("PROYECTOS", "TIEMPO(H)", "%"),),
     "areas": (("ÁREA", "TICKETS", "%"),),
+    "detalle": (
+        ("TIPO DE ATENCION", "DETALLE", "FECHA", "USUARIO", "AREA_USUARIO", "HORAS"),
+    ),
 }
 
 # La tabla de responsables solo existe en la plantilla nueva; en la anterior se

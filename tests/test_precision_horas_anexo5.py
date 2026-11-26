@@ -208,7 +208,7 @@ class PruebasAcumulacionAnexo5(unittest.TestCase):
         filas = contenido.filas_por_tabla["resumen_tipo_atencion"]
         self.assertEqual(
             [(categoria, horas) for categoria, horas, _ in filas],
-            [("Incidencia", "830.50"), ("Solicitud", "1.50"), ("Proyecto", "1.00")],
+            [("Incidencias", "830.50"), ("Solicitudes", "1.50"), ("Proyectos", "1.00")],
         )
         for _, horas, _ in filas:
             self.assertRegex(horas, PATRON_HORAS)
@@ -252,9 +252,9 @@ class PruebasAcumulacionAnexo5(unittest.TestCase):
         self.assertEqual(
             resumen,
             {
-                "Incidencia": "830.50",
-                "Solicitud": "1.50",
-                "Proyecto": "1.00",
+                "Incidencias": "830.50",
+                "Solicitudes": "1.50",
+                "Proyectos": "1.00",
                 "TOTAL": "833.00",
             },
         )

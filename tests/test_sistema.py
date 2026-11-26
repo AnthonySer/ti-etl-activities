@@ -964,6 +964,10 @@ class PruebasReportes(BaseTemporal):
         self.assertTrue(
             Path(resultado["markdown"]).read_text(encoding="utf-8").startswith("#")
         )
+        self.assertEqual(
+            set(resultado["tablas"]["Por actividad"]["Grupo"]),
+            {"Incidencias", "Solicitudes", "Proyectos"},
+        )
         libro = load_workbook(resultado["xlsx"])
         try:
             self.assertEqual(
@@ -972,7 +976,7 @@ class PruebasReportes(BaseTemporal):
             )
             self.assertEqual(
                 next(libro["RESUMEN"].iter_rows(min_row=1, max_row=1, values_only=True)),
-                ("TIPO DE ATENCION", "TIEMPO(H)", "%"),
+                ("TIPO DE ATENCIÓN", "TIEMPO(H)", "%"),
             )
             self.assertEqual(
                 [fila[0] for fila in libro["RESUMEN"].iter_rows(min_row=2, max_row=5, values_only=True)],
@@ -983,6 +987,10 @@ class PruebasReportes(BaseTemporal):
             self.assertAlmostEqual(resumen["C5"].value, 1.0)
             self.assertEqual(resumen["C2"].number_format, "0.00%")
             self.assertEqual(resumen["B5"].value, 11.5)
+            self.assertEqual(
+                [resumen.cell(row=fila, column=2).value for fila in range(2, 5)],
+                [3.5, 5.0, 3.0],
+            )
             self.assertNotIn(
                 "$A$5",
                 libro["RESUMEN"]._charts[0].series[0].cat.numRef.f,
@@ -1012,7 +1020,7 @@ class PruebasReportes(BaseTemporal):
             self.assertEqual(libro["AREA"]["B5"].value, 4)
             self.assertEqual(
                 next(libro["DETALLE"].iter_rows(min_row=1, max_row=1, values_only=True)),
-                ("TIPO DE ATENCION", "DETALLE", "FECHA", "USUARIO", "AREA_USUARIO", "HORAS"),
+                ("TIPO DE ATENCIÓN", "DETALLE", "FECHA", "USUARIO", "AREA_USUARIO", "HORAS"),
             )
             self.assertEqual(libro["DETALLE"].max_column, 6)
             self.assertEqual(libro["DETALLE"]["C2"].value.date(), date(2026, 9, 1))

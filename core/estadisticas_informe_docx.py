@@ -18,8 +18,8 @@ from core.modelo_informe_docx import (
 from core.normalizador import normalizar_area
 
 
-_CATEGORIAS = ("Incidencia", "Solicitud", "Proyecto")
-_TICKETS_CANDIDATOS = frozenset({"Incidencia", "Solicitud"})
+_CATEGORIAS = {"Incidencia": "Incidencias", "Solicitud": "Solicitudes", "Proyecto": "Proyectos"}
+_TICKETS_CANDIDATOS = frozenset({"Incidencia": "Incidencias", "Solicitud": "Solicitudes"})
 _ALIAS_AREAS_INFORME = {
     "DIRECCION DE OPERACIONES": "DIRECCIÓN DE OPERACIONES",
     "INVESTIGACION DESARROLLO": "INVESTIGACION Y DESARROLLO",
